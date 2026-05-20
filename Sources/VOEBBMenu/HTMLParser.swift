@@ -55,25 +55,22 @@ enum HTMLParser {
     }
 
     private static func parseLoanRow(_ rowHTML: String, formatter: DateFormatter) -> Loan? {
-        // Due date: <td class=" zellgb">15.06.2026</td>
-        guard let dateStr = extractTDContent(rowHTML, classFragment: "zellgb"),
-              let dueDate = formatter.date(from: dateStr.trimmingCharacters(in: .whitespaces))
-        else { return nil }
-
-        // Get all rTable_td_text columns (library is first, title is second)
+        // Current VÖBB HTML layout: all columns use rTable_td_text
+        // Column order: [0]=date, [1]=library, [2]=title, [3]=status
         let textCols = extractAllTDContents(rowHTML, classFragment: "rTable_td_text")
-        guard textCols.count >= 2 else { return nil }
+        guard textCols.count >= 4 else { return nil }
 
-        let library = stripHTML(textCols[0])
-        let titleFull = textCols[1]
+        let dateStr = stripHTML(textCols[0]).trimmingCharacters(in: .whitespaces)
+        guard let dueDate = formatter.date(from: dateStr) else { return nil }
+
+        let library = stripHTML(textCols[1]).trimmingCharacters(in: .whitespaces)
+
         // Title is first line before <br>
-        let titleLine = titleFull.components(separatedBy: "<br>").first ?? titleFull
+        let titleLine = textCols[2].components(separatedBy: "<br>").first ?? textCols[2]
         let title = stripHTML(titleLine).trimmingCharacters(in: .whitespaces)
-        // Clean ¬ characters used in some German catalog records
-        let cleanTitle = title.replacingOccurrences(of: "¬", with: "")
+            .replacingOccurrences(of: "¬", with: "")
 
-        // Renewal status: <td class=" zellef"><b>...</b></td>
-        let status = extractTDContent(rowHTML, classFragment: "zellef").map { stripHTML($0) } ?? ""
+        let status = stripHTML(textCols[3]).trimmingCharacters(in: .whitespaces)
 
         // Checkbox value for renewal
         let cbPattern = try! NSRegularExpression(
@@ -84,11 +81,11 @@ enum HTMLParser {
         let cbValue = cbMatch.flatMap { Range($0.range(at: 1), in: rowHTML).map { String(rowHTML[$0]) } } ?? ""
 
         return Loan(
-            title: cleanTitle,
+            title: title,
             dueDate: dueDate,
-            dueDateString: dateStr.trimmingCharacters(in: .whitespaces),
-            library: stripHTML(library).trimmingCharacters(in: .whitespaces),
-            renewalStatus: status.trimmingCharacters(in: .whitespaces),
+            dueDateString: dateStr,
+            library: library,
+            renewalStatus: status,
             checkboxValue: cbValue
         )
     }
