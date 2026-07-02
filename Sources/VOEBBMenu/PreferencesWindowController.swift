@@ -154,6 +154,15 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         return buttons
     }
 
+    /// Hintergrund nicht ausgewählter Pills — passend zu den Bezel-Buttons darüber (#ECECEC im Hellmodus).
+    /// (quaternaryLabelColor ist eine Textfarbe mit ~10 % Deckkraft und als Fläche fast unsichtbar.)
+    private static let pillUnselectedBackground = NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return isDark
+            ? NSColor(srgbRed: 0.23, green: 0.23, blue: 0.24, alpha: 1)
+            : NSColor(srgbRed: 236.0 / 255.0, green: 236.0 / 255.0, blue: 236.0 / 255.0, alpha: 1)
+    }
+
     private func stylePills(_ buttons: [NSButton], selectedTag: Int, suffix: String) {
         for btn in buttons {
             let selected = btn.tag == selectedTag
@@ -164,7 +173,11 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
                 .foregroundColor: selected ? NSColor.white : NSColor.labelColor,
                 .paragraphStyle: paragraphStyle
             ])
-            btn.layer?.backgroundColor = (selected ? NSColor.controlAccentColor : NSColor.quaternaryLabelColor).cgColor
+            let bg = selected ? NSColor.controlAccentColor : Self.pillUnselectedBackground
+            // In der Appearance des Buttons auflösen, damit Hell/Dunkel korrekt greift.
+            btn.effectiveAppearance.performAsCurrentDrawingAppearance {
+                btn.layer?.backgroundColor = bg.cgColor
+            }
         }
     }
 
