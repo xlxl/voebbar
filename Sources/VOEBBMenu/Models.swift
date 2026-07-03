@@ -19,11 +19,30 @@ struct Loan {
     let renewalStatus: String
     let checkboxValue: String
 
+    /// Stable per-item barcode from the title cell (11-digit), used as the archive key.
+    var mediaNumber: String = ""
+    /// Shelf signature / call number, e.g. "Tonie Leos", "CD-X 3 Kind".
+    var signature: String = ""
+    /// Coarse, heuristic media category derived from the type tag / signature.
+    var mediaType: String = "Buch"
+
     /// Result of the "Markierte Medien verlängerbar?" probe, merged in during refresh.
     /// nil = probe didn't run or the row couldn't be matched.
     var isRenewable: Bool? = nil
     /// Reason a blocked item can't be renewed (e.g. "Vormerkungen"); empty otherwise.
     var renewalReason: String = ""
+
+    /// Best-effort media category. Heuristic: driven by the leading "[…]" type tag and the
+    /// shelf signature prefix; defaults to "Buch". Not authoritative — VÖBB has no clean field.
+    static func mediaType(typeTag: String, signature: String) -> String {
+        let hay = (typeTag + " " + signature).lowercased()
+        if hay.contains("tonie") { return "Tonie" }
+        if hay.contains("blu-ray") || hay.contains("dvd") || hay.contains("video") { return "DVD/Video" }
+        if hay.contains("cd") || hay.contains("hörbuch") || hay.contains("hoerbuch") { return "CD/Hörbuch" }
+        if hay.contains("konsole") || hay.contains("spiel") || hay.contains("game") { return "Spiel" }
+        if hay.contains("gerät") || hay.contains("laptop") { return "Gerät" }
+        return "Buch"
+    }
 
     /// Überfällig erst ab dem Tag NACH dem Fälligkeitsdatum — am Fälligkeitstag selbst
     /// ist das Buch noch regulär zurückgebbar/verlängerbar. (dueDate ist Mitternacht

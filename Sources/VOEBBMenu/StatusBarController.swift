@@ -82,6 +82,11 @@ final class StatusBarController: NSObject {
             }
 
             let finalResults = results
+
+            // Ausleihen ins persistente Archiv schreiben (nur erfolgreiche Konten),
+            // noch im Hintergrund-Task – nicht auf dem Main-Thread.
+            ArchiveStore.shared.record(finalResults)
+
             await MainActor.run {
                 self.currentData = finalResults
                 self.isLoading = false
@@ -194,6 +199,11 @@ final class StatusBarController: NSObject {
         let overviewItem = NSMenuItem(title: "Alle Ausleihen anzeigen …", action: #selector(onOverview), keyEquivalent: "o")
         overviewItem.target = self
         menu.addItem(overviewItem)
+
+        // Archiv (zeigt vorerst die DB-Datei im Finder)
+        let archiveItem = NSMenuItem(title: "Archiv anzeigen …", action: #selector(onShowArchive), keyEquivalent: "")
+        archiveItem.target = self
+        menu.addItem(archiveItem)
 
         // Aktualisieren
         let refreshTitle = buildRefreshTitle()
@@ -335,6 +345,16 @@ final class StatusBarController: NSObject {
 
     @objc private func onOverview() {
         OverviewWindowController.shared.showWindow(with: currentData)
+    }
+
+    @objc private func onShowArchive() {
+        let url = ArchiveStore.databaseURL
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            // Noch nichts geschrieben (z.B. vor dem ersten Refresh) → Ordner zeigen.
+            NSWorkspace.shared.activateFileViewerSelecting([url.deletingLastPathComponent()])
+        }
     }
 
     @objc private func onRenew(_ sender: NSMenuItem) {

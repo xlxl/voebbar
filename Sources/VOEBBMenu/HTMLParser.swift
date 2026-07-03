@@ -66,7 +66,7 @@ enum HTMLParser {
 
         let library = stripHTML(cols[2]).trimmingCharacters(in: .whitespaces)
 
-        let title = cleanTitleColumn(cols[3])
+        let parsedTitle = parseTitleColumn(cols[3])
 
         let status = stripHTML(cols[4]).trimmingCharacters(in: .whitespaces)
 
@@ -79,12 +79,15 @@ enum HTMLParser {
         let cbValue = cbMatch.flatMap { Range($0.range(at: 1), in: rowHTML).map { String(rowHTML[$0]) } } ?? ""
 
         return Loan(
-            title: title,
+            title: parsedTitle.title,
             dueDate: dueDate,
             dueDateString: dateStr,
             library: library,
             renewalStatus: status,
-            checkboxValue: cbValue
+            checkboxValue: cbValue,
+            mediaNumber: parsedTitle.mediaNumber,
+            signature: parsedTitle.signature,
+            mediaType: Loan.mediaType(typeTag: parsedTitle.typeTag, signature: parsedTitle.signature)
         )
     }
 
@@ -188,15 +191,46 @@ enum HTMLParser {
 
     /// Title column: split on <br>, drop leading media-type tags like "[DVD-Video]".
     static func cleanTitleColumn(_ raw: String) -> String {
-        let titleParts = raw
+        parseTitleColumn(raw).title
+    }
+
+    /// Full breakdown of the title cell, which is `<br>`-separated:
+    /// an optional leading media-type tag "[…]", the title, a shelf signature,
+    /// and a trailing 9+ digit media number (barcode). Any part may be absent.
+    static func parseTitleColumn(_ raw: String) -> (title: String, signature: String, mediaNumber: String, typeTag: String) {
+        var parts = raw
             .components(separatedBy: "<br>")
             .map { stripHTML($0).trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "¬", with: "") }
             .filter { !$0.isEmpty }
-        // A media-type indicator looks like "[DVD-Video]", "[ND-Video]", "[Blu-ray]" etc.
-        let mediaTypePattern = try! NSRegularExpression(pattern: #"^\[.+\]$"#)
-        return titleParts.first(where: {
-            mediaTypePattern.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) == nil
-        }) ?? titleParts.first ?? ""
+
+        // Leading media-type tag like "[DVD-Video]", "[Gerät (Laptop u.a.)]".
+        let typeTagPattern = try! NSRegularExpression(pattern: #"^\[.+\]$"#)
+        func isTypeTag(_ s: String) -> Bool {
+            typeTagPattern.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+        }
+        var typeTag = ""
+        if let first = parts.first, isTypeTag(first) {
+            typeTag = first
+            parts.removeFirst()
+        }
+
+        // Trailing media number: a part that is only digits (barcode), 9+ chars.
+        var mediaNumber = ""
+        if let last = parts.last, last.range(of: #"^\d{9,}$"#, options: .regularExpression) != nil {
+            mediaNumber = last
+            parts.removeLast()
+        }
+
+        // Shelf signature: whatever remains after the title (last remaining part),
+        // but only if there is still a title line before it.
+        var signature = ""
+        if parts.count > 1, let last = parts.last {
+            signature = last
+            parts.removeLast()
+        }
+
+        let title = parts.first ?? ""
+        return (title, signature, mediaNumber, typeTag)
     }
 
     /// All <td> contents in document order, regardless of class.

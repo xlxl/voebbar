@@ -7,7 +7,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "VOEBBMenu",
-            path: "Sources/VOEBBMenu"
+            path: "Sources/VOEBBMenu",
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+            ]
         ),
     ]
 )
