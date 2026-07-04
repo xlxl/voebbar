@@ -187,6 +187,56 @@ enum HTMLParser {
         return rows
     }
 
+    // MARK: - Catalog (Recherche) — enrichment
+
+    struct CatalogHit {
+        let isbn: String
+        let coverURL: String
+        let recordID: String
+    }
+
+    /// From a Trefferliste: the first result's ISBN + VLB cover URL (the cover `<img>` carries
+    /// the ISBN in its `data-src`) and its record id (`data-ajax`, for the optional
+    /// Vollanzeige). Returns nil when the search yields no ISBN-bearing result.
+    static func parseCatalogResult(_ html: String) -> CatalogHit? {
+        guard let isbnRange = html.range(of: #"/vlb/cover/(\d{10,13}[Xx]?)"#, options: .regularExpression) else {
+            return nil
+        }
+        let isbn = String(html[isbnRange]).replacingOccurrences(of: "/vlb/cover/", with: "")
+        let coverURL = "https://www.voebb.de/vlb/cover/\(isbn)/m"
+
+        var recordID = ""
+        if let idRange = html.range(of: #"data-ajax="[A-Z0-9]+""#, options: .regularExpression) {
+            recordID = String(html[idRange])
+                .replacingOccurrences(of: "data-ajax=\"", with: "")
+                .replacingOccurrences(of: "\"", with: "")
+        }
+        return CatalogHit(isbn: isbn, coverURL: coverURL, recordID: recordID)
+    }
+
+    struct CatalogDetail { let blurb: String; let subjects: String; let systematik: String }
+
+    /// From a Vollanzeige: the optional blurb (Inhalt), subjects (Schlagwörter) and shelf
+    /// classification (Verbundsystematik). Fields are `<tr><th scope="row">L</th><td>…</td></tr>`.
+    static func parseVollanzeige(_ html: String) -> CatalogDetail {
+        // VÖBB labels the thematic subjects "Schlagwortkette" (older records: "Schlagwörter").
+        var subjects = vollField(html, "Schlagwortkette")
+        if subjects.isEmpty { subjects = vollField(html, "Schlagwörter") }
+        return CatalogDetail(
+            blurb: vollField(html, "Inhalt"),
+            subjects: subjects,
+            systematik: vollField(html, "Verbundsystematik")
+        )
+    }
+
+    private static func vollField(_ html: String, _ label: String) -> String {
+        let pattern = "<th[^>]*>\\s*\(NSRegularExpression.escapedPattern(for: label))\\s*</th>\\s*<td[^>]*>(.*?)</td>"
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators, .caseInsensitive]),
+              let m = re.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let r = Range(m.range(at: 1), in: html) else { return "" }
+        return stripHTML(String(html[r]))
+    }
+
     // MARK: - Helpers
 
     /// Title column: split on <br>, drop leading media-type tags like "[DVD-Video]".

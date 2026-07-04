@@ -75,7 +75,32 @@ final class ArchiveStore {
         );
         """)
         exec("CREATE INDEX IF NOT EXISTS idx_open ON borrow_events (account_card, media_number, is_open);")
-        exec("PRAGMA user_version=1;")
+
+        // Per-item enrichment fetched from VÖBB's catalog (ISBN/cover/blurb/…). Keyed by the
+        // item barcode. voebbar writes this; the archive app reads it.
+        exec("""
+        CREATE TABLE IF NOT EXISTS media_details (
+            media_number TEXT PRIMARY KEY,
+            isbn         TEXT NOT NULL DEFAULT '',
+            cover_path   TEXT NOT NULL DEFAULT '',
+            blurb        TEXT NOT NULL DEFAULT '',
+            subjects     TEXT NOT NULL DEFAULT '',
+            systematik   TEXT NOT NULL DEFAULT '',
+            source       TEXT NOT NULL DEFAULT '',   -- 'title' | 'isbn' | 'manual'
+            status       TEXT NOT NULL DEFAULT '',   -- 'found' | 'notfound'
+            fetched_at   TEXT NOT NULL DEFAULT ''
+        );
+        """)
+        // Manual ISBN corrections. The archive app WRITES these; voebbar reads them and
+        // re-fetches the record by ISBN (unambiguous). Small shared contract, reverse direction.
+        exec("""
+        CREATE TABLE IF NOT EXISTS media_isbn_override (
+            media_number TEXT PRIMARY KEY,
+            isbn         TEXT NOT NULL,
+            created_at   TEXT NOT NULL DEFAULT ''
+        );
+        """)
+        exec("PRAGMA user_version=2;")
     }
 
     // MARK: - Per-account write
@@ -174,6 +199,86 @@ final class ArchiveStore {
             }
             sqlite3_finalize(up)
         }
+    }
+
+    // MARK: - Media details (enrichment from VÖBB's catalog)
+
+    struct EnrichTarget { let mediaNumber: String; let title: String }
+    struct ISBNOverride { let mediaNumber: String; let isbn: String }
+
+    /// Items in borrow_events not yet in media_details (neither 'found' nor 'notfound').
+    /// Drives the strictly-incremental crawl — processed items are never re-crawled.
+    func mediaNeedingEnrichment() -> [EnrichTarget] {
+        return queue.sync {
+            guard db != nil else { return [] }
+            var out: [EnrichTarget] = []
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            SELECT b.media_number, b.title FROM borrow_events b
+            LEFT JOIN media_details d ON d.media_number = b.media_number
+            WHERE d.media_number IS NULL AND b.media_number <> ''
+            GROUP BY b.media_number;
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(EnrichTarget(mediaNumber: col(stmt, 0), title: col(stmt, 1)))
+            }
+            return out
+        }
+    }
+
+    /// Manual ISBN corrections not yet applied (missing details, or not locked as 'manual',
+    /// or a different ISBN). Re-crawled by ISBN, then locked with source='manual'.
+    func pendingISBNOverrides() -> [ISBNOverride] {
+        return queue.sync {
+            guard db != nil else { return [] }
+            var out: [ISBNOverride] = []
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            SELECT o.media_number, o.isbn FROM media_isbn_override o
+            LEFT JOIN media_details d ON d.media_number = o.media_number
+            WHERE d.media_number IS NULL OR d.source <> 'manual' OR d.isbn <> o.isbn;
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(ISBNOverride(mediaNumber: col(stmt, 0), isbn: col(stmt, 1)))
+            }
+            return out
+        }
+    }
+
+    func upsertMediaDetails(mediaNumber: String, isbn: String, coverPath: String, blurb: String,
+                            subjects: String, systematik: String, source: String, status: String) {
+        queue.sync {
+            guard db != nil else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            INSERT INTO media_details
+                (media_number, isbn, cover_path, blurb, subjects, systematik, source, status, fetched_at)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(media_number) DO UPDATE SET isbn=excluded.isbn, cover_path=excluded.cover_path,
+                blurb=excluded.blurb, subjects=excluded.subjects, systematik=excluded.systematik,
+                source=excluded.source, status=excluded.status, fetched_at=excluded.fetched_at;
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            bind(stmt, 1, mediaNumber); bind(stmt, 2, isbn); bind(stmt, 3, coverPath); bind(stmt, 4, blurb)
+            bind(stmt, 5, subjects); bind(stmt, 6, systematik); bind(stmt, 7, source); bind(stmt, 8, status)
+            bind(stmt, 9, Self.iso8601(Date()))
+            sqlite3_step(stmt)
+        }
+    }
+
+    /// Directory next to the DB where cover images are cached (`…/de.voebb.menubar/covers`).
+    static var coversDirectory: URL {
+        databaseURL.deletingLastPathComponent().appendingPathComponent("covers", isDirectory: true)
+    }
+
+    private func col(_ stmt: OpaquePointer?, _ index: Int32) -> String {
+        guard let c = sqlite3_column_text(stmt, index) else { return "" }
+        return String(cString: c)
     }
 
     // MARK: - Helpers

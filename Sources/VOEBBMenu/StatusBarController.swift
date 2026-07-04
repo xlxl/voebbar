@@ -94,6 +94,11 @@ final class StatusBarController: NSObject {
                 self.updateMenu()
                 OverviewWindowController.shared.reload(with: finalResults)
             }
+
+            // Anreicherung (ISBN/Cover aus dem VÖBB-Katalog) im Hintergrund, nachdem die UI
+            // aktualisiert ist. Strikt inkrementell: crawlt nur noch nicht verarbeitete Medien
+            // (+ ausstehende manuelle ISBN-Korrekturen). Nur für die Archiv-App relevant.
+            await CatalogEnricher.shared.enrichMissing()
         }
     }
 
