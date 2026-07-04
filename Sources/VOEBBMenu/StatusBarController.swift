@@ -99,6 +99,10 @@ final class StatusBarController: NSObject {
             // aktualisiert ist. Strikt inkrementell: crawlt nur noch nicht verarbeitete Medien
             // (+ ausstehende manuelle ISBN-Korrekturen). Nur für die Archiv-App relevant.
             await CatalogEnricher.shared.enrichMissing()
+
+            // Tonie-Bilder aus my.tonies.com (nur wenn verbunden). Ein GraphQL-Call pro Refresh,
+            // matcht neue Tonie-Ausleihen und lädt das Tonie-Bild in denselben Cover-Cache.
+            await ToniesEnricher.shared.enrichMissing()
         }
     }
 
@@ -210,6 +214,9 @@ final class StatusBarController: NSObject {
         archiveItem.target = self
         menu.addItem(archiveItem)
 
+        // Tonie-Bilder (my.tonies.com) — Verbindung verwalten
+        addToniesSection(to: menu)
+
         // Aktualisieren
         let refreshTitle = buildRefreshTitle()
         let refreshItem = NSMenuItem(title: refreshTitle, action: #selector(onRefresh), keyEquivalent: "r")
@@ -228,6 +235,30 @@ final class StatusBarController: NSObject {
 
         statusItem.menu = menu
         menu.delegate = self
+    }
+
+    // MARK: - Tonies Section
+
+    private func addToniesSection(to menu: NSMenu) {
+        let connected = ToniesAuth.isConnected
+        let parent = NSMenuItem(title: "Tonie-Bilder", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        add(to: submenu, title: connected ? "  ✓  Verbunden" : "  –  Nicht verbunden", enabled: false)
+
+        let connectItem = NSMenuItem(title: connected ? "Neu verbinden …" : "Mit tonies verbinden …",
+                                     action: #selector(onToniesConnect), keyEquivalent: "")
+        connectItem.target = self
+        submenu.addItem(connectItem)
+
+        if connected {
+            let disconnectItem = NSMenuItem(title: "Verbindung trennen", action: #selector(onToniesDisconnect), keyEquivalent: "")
+            disconnectItem.target = self
+            submenu.addItem(disconnectItem)
+        }
+
+        parent.submenu = submenu
+        menu.addItem(parent)
     }
 
     // MARK: - Account Section
@@ -350,6 +381,19 @@ final class StatusBarController: NSObject {
 
     @objc private func onOverview() {
         OverviewWindowController.shared.showWindow(with: currentData)
+    }
+
+    @objc private func onToniesConnect() {
+        ToniesLoginWindowController.shared.present { [weak self] success in
+            self?.updateMenu()
+            // Direkt nach dem Verbinden anreichern, damit Tonie-Bilder sofort geladen werden.
+            if success { self?.refresh() }
+        }
+    }
+
+    @objc private func onToniesDisconnect() {
+        ToniesAuth.disconnect()
+        updateMenu()
     }
 
     @objc private func onShowArchive() {

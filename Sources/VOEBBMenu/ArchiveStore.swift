@@ -249,6 +249,51 @@ final class ArchiveStore {
         }
     }
 
+    /// Borrowed Tonies (and CD/Hörbuch items, which may be mislabelled Tonies) that don't yet have
+    /// a Tonie image. A prior VÖBB-catalog row (source='title'/'notfound') doesn't count — only a
+    /// real `source='tonie'` cover does — so the Tonie enricher still fills it. Not locked as
+    /// notfound: an unmatched Tonie may simply not have been on the box yet.
+    func toniesNeedingImage() -> [EnrichTarget] {
+        return queue.sync {
+            guard db != nil else { return [] }
+            var out: [EnrichTarget] = []
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            SELECT b.media_number, b.title FROM borrow_events b
+            LEFT JOIN media_details d ON d.media_number = b.media_number
+            WHERE b.media_number <> ''
+              AND (b.media_type = 'Tonie' OR b.media_type LIKE '%Hörbuch%' OR b.media_type LIKE '%CD%')
+              AND NOT (d.source = 'tonie' AND d.cover_path <> '')
+            GROUP BY b.media_number;
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(EnrichTarget(mediaNumber: col(stmt, 0), title: col(stmt, 1)))
+            }
+            return out
+        }
+    }
+
+    /// Sets a Tonie's cover image without clobbering any book fields (isbn/blurb/… stay untouched on
+    /// conflict). Marks the row `source='tonie'`, `status='found'`.
+    func upsertToniImage(mediaNumber: String, coverPath: String) {
+        queue.sync {
+            guard db != nil else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            INSERT INTO media_details (media_number, cover_path, source, status, fetched_at)
+            VALUES (?,?,'tonie','found',?)
+            ON CONFLICT(media_number) DO UPDATE SET cover_path=excluded.cover_path,
+                source='tonie', status='found', fetched_at=excluded.fetched_at;
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            bind(stmt, 1, mediaNumber); bind(stmt, 2, coverPath); bind(stmt, 3, Self.iso8601(Date()))
+            sqlite3_step(stmt)
+        }
+    }
+
     func upsertMediaDetails(mediaNumber: String, isbn: String, coverPath: String, blurb: String,
                             subjects: String, systematik: String, source: String, status: String) {
         queue.sync {
