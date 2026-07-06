@@ -346,12 +346,36 @@ enum HTMLParser {
         var result = html
         // Remove tags
         result = result.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
-        // Decode common HTML entities (&amp; last, so "&amp;lt;" doesn't double-decode)
+        // Decode numeric character references (&#8211; / &#x2013; — dashes, typographic quotes …)
+        result = decodeNumericEntities(result)
+        // Decode common named entities (&amp; last, so "&amp;lt;" doesn't double-decode)
         for (entity, char) in Self.htmlEntities {
             result = result.replacingOccurrences(of: entity, with: char)
         }
         // Collapse whitespace
         result = result.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         return result.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Replaces decimal (`&#8222;`) and hex (`&#x201E;`) character references with their characters.
+    private static func decodeNumericEntities(_ s: String) -> String {
+        guard s.contains("&#") else { return s }
+        let regex = try! NSRegularExpression(pattern: #"&#(x[0-9a-fA-F]+|\d+);"#)
+        var out = ""
+        var cursor = s.startIndex
+        for m in regex.matches(in: s, range: NSRange(s.startIndex..., in: s)) {
+            guard let whole = Range(m.range, in: s), let numRange = Range(m.range(at: 1), in: s) else { continue }
+            let num = s[numRange]
+            let value = num.hasPrefix("x") ? UInt32(num.dropFirst(), radix: 16) : UInt32(num)
+            out += s[cursor..<whole.lowerBound]
+            if let value, let scalar = Unicode.Scalar(value) {
+                out.append(Character(scalar))
+            } else {
+                out += s[whole]   // undecodable — keep the raw reference
+            }
+            cursor = whole.upperBound
+        }
+        out += s[cursor...]
+        return out
     }
 }

@@ -14,7 +14,7 @@ final class CatalogEnricher {
     private init() {}
 
     private let base = "https://www.voebb.de"
-    private let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+    private let userAgent = ADISForm.userAgent
     private let politeDelay: UInt64 = 400_000_000 // 0.4 s between items
 
     // MARK: - Orchestration
@@ -214,27 +214,7 @@ final class CatalogEnricher {
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
     }
 
-    private func extractHiddenInputs(_ html: String) -> [String: String] {
-        var result: [String: String] = [:]
-        let pattern = try! NSRegularExpression(pattern: #"<input[^>]+type=['"]hidden['"][^>]*>"#, options: .caseInsensitive)
-        for match in pattern.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
-            guard let range = Range(match.range, in: html) else { continue }
-            let tag = String(html[range])
-            guard let name = attr(tag, "name") else { continue }
-            result[name] = attr(tag, "value") ?? ""
-        }
-        return result
-    }
-
-    private func attr(_ tag: String, _ name: String) -> String? {
-        guard let m = tag.range(of: "\(name)=['\"]([^'\"]*)['\"]", options: [.regularExpression, .caseInsensitive]) else { return nil }
-        let parts = String(tag[m]).components(separatedBy: CharacterSet(charactersIn: "\"'"))
-        return parts.count >= 2 ? parts[1] : nil
-    }
-
-    private func urlEncode(_ string: String) -> String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        return string.addingPercentEncoding(withAllowedCharacters: allowed) ?? string
-    }
+    // Shared with VOEBBSession via ADISForm.
+    private func extractHiddenInputs(_ html: String) -> [String: String] { ADISForm.extractHiddenInputs(html) }
+    private func urlEncode(_ string: String) -> String { ADISForm.urlEncode(string) }
 }

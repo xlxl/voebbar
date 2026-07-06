@@ -290,7 +290,7 @@ final class VOEBBSession {
 
     private func get(url: String) async throws -> String {
         var req = URLRequest(url: URL(string: url)!)
-        req.addValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+        req.addValue(ADISForm.userAgent, forHTTPHeaderField: "User-Agent")
         req.addValue("de-DE,de;q=0.9", forHTTPHeaderField: "Accept-Language")
         req.addValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
 
@@ -316,7 +316,7 @@ final class VOEBBSession {
         req.httpMethod = "POST"
         req.httpBody = body.data(using: .utf8)
         req.addValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        req.addValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+        req.addValue(ADISForm.userAgent, forHTTPHeaderField: "User-Agent")
         req.addValue("de-DE,de;q=0.9", forHTTPHeaderField: "Accept-Language")
         req.addValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         if !referer.isEmpty {
@@ -328,37 +328,9 @@ final class VOEBBSession {
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
     }
 
-    // MARK: - Helpers
+    // MARK: - Helpers (shared with CatalogEnricher via ADISForm)
 
-    private func extractHiddenInputs(_ html: String) -> [String: String] {
-        var result: [String: String] = [:]
-        let pattern = try! NSRegularExpression(
-            pattern: #"<input[^>]+type=['"]hidden['"][^>]*>"#,
-            options: .caseInsensitive
-        )
-        let matches = pattern.matches(in: html, range: NSRange(html.startIndex..., in: html))
-        for match in matches {
-            guard let range = Range(match.range, in: html) else { continue }
-            let tag = String(html[range])
-            let name = extractAttr(tag, attr: "name")
-            let value = extractAttr(tag, attr: "value") ?? ""
-            if let name = name { result[name] = value }
-        }
-        return result
-    }
+    private func extractHiddenInputs(_ html: String) -> [String: String] { ADISForm.extractHiddenInputs(html) }
 
-    private func extractAttr(_ tag: String, attr: String) -> String? {
-        let pattern = "\(attr)=['\"]([^'\"]*)['\"]"
-        guard let m = tag.range(of: pattern, options: [.regularExpression, .caseInsensitive]) else { return nil }
-        let matchStr = String(tag[m])
-        // Extract value between quotes
-        let parts = matchStr.components(separatedBy: CharacterSet(charactersIn: "\"'"))
-        return parts.count >= 2 ? parts[1] : nil
-    }
-
-    private func urlEncode(_ string: String) -> String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        return string.addingPercentEncoding(withAllowedCharacters: allowed) ?? string
-    }
+    private func urlEncode(_ string: String) -> String { ADISForm.urlEncode(string) }
 }

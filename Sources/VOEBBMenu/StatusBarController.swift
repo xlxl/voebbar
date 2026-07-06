@@ -365,7 +365,7 @@ final class StatusBarController: NSObject {
             for loan in data.loans.sorted(by: { $0.dueDate < $1.dueDate }) {
                 let short = truncate(loan.title, to: Self.maxTitleLength)
                 let menuItem = NSMenuItem(title: "\(loan.bookEmoji)  \(short)", action: nil, keyEquivalent: "")
-                menuItem.toolTip = "\(loan.title)\n📅 Fällig: \(loan.dueDateString)\n🏛 \(loan.library)"
+                menuItem.toolTip = "\(loan.title)\n📅 Fällig: \(loan.dueDateString)\n🏛 \(LibraryName.short(loan.library))"
                 menuItem.isEnabled = false
                 submenu.addItem(menuItem)
             }
@@ -374,9 +374,9 @@ final class StatusBarController: NSObject {
         }
 
         // Aufschlüsselung nach Bibliothek — damit man vor der Abgabe weiß, wie viele Medien
-        // pro Standort herauszusuchen sind.
+        // pro Standort herauszusuchen sind. Bezirks-Präfix weggekürzt (LibraryName.short).
         if !data.loans.isEmpty {
-            let byLibrary = Dictionary(grouping: data.loans, by: { $0.library })
+            let byLibrary = Dictionary(grouping: data.loans, by: { LibraryName.short($0.library) })
                 .map { (library: $0.key, count: $0.value.count) }
                 .sorted { $0.count != $1.count ? $0.count > $1.count : $0.library < $1.library }
 
@@ -384,9 +384,7 @@ final class StatusBarController: NSObject {
             let libMenu = NSMenu()
             for entry in byLibrary {
                 let name = entry.library.isEmpty ? "Unbekannte Bibliothek" : entry.library
-                let row = NSMenuItem(title: "\(truncate(name, to: Self.maxTitleLength)): \(entry.count)",
-                                     action: nil, keyEquivalent: "")
-                row.toolTip = "\(name): \(entry.count) Medi\(entry.count == 1 ? "um" : "en")"
+                let row = NSMenuItem(title: "\(name): \(entry.count)", action: nil, keyEquivalent: "")
                 row.isEnabled = false
                 libMenu.addItem(row)
             }

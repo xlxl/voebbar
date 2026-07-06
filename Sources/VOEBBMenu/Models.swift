@@ -1,5 +1,16 @@
 import Foundation
 
+/// VÖBB library names carry the district as a prefix ("Charlottenburg-Wilmersdorf: Adolf-
+/// Reichwein-Bibliothek"), which makes the actual branch name hard to read. The UI shows only
+/// the part after the last ":" everywhere (menus, tables, tooltips).
+enum LibraryName {
+    static func short(_ full: String) -> String {
+        guard let colon = full.lastIndex(of: ":") else { return full }
+        let name = full[full.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? full : name
+    }
+}
+
 struct LibraryAccount: Codable, Identifiable, Equatable {
     var id: String { cardNumber }
     var name: String

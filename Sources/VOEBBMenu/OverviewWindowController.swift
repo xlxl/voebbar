@@ -222,7 +222,7 @@ extension OverviewWindowController: NSTableViewDelegate {
 
         case "title":
             cell.stringValue = loan.title
-            cell.toolTip = "\(loan.title)\n\(loan.library)"
+            cell.toolTip = "\(loan.title)\n\(LibraryName.short(loan.library))"
 
         case "account":
             cell.stringValue = item.account
@@ -261,33 +261,11 @@ extension OverviewWindowController: NSTableViewDelegate {
             }
 
         case "library":
-            // Kürze auf Bezirksnamen
-            cell.stringValue = shortenLibrary(loan.library)
-            cell.toolTip = loan.library
+            cell.stringValue = LibraryName.short(loan.library)
 
         default: break
         }
 
         return cell
-    }
-
-    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        guard row < allLoans.count else { return nil }
-        let loan = allLoans[row].loan
-        if loan.isOverdue {
-            let v = NSTableRowView()
-            return v
-        }
-        return nil
-    }
-
-    /// "Friedrichshain-Kreuzberg: Bezirkszentralbibliothek Pablo Neruda"
-    /// → "FK: BZ Pablo Neruda"  (kompakte Form)
-    private func shortenLibrary(_ full: String) -> String {
-        // Nimm alles nach dem letzten ':'
-        if let colon = full.lastIndex(of: ":") {
-            return String(full[full.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-        }
-        return full
     }
 }

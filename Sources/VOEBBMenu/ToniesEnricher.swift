@@ -16,7 +16,7 @@ final class ToniesEnricher {
     private init() {}
 
     private let graphqlURL = "https://api.prod.tcs.toys/v2/graphql"
-    private let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+    private let userAgent = ADISForm.userAgent
 
     // MARK: - Orchestration
 
