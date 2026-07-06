@@ -67,8 +67,11 @@ final class CatalogEnricher {
         }
 
         guard let hit = HTMLParser.parseCatalogResult(resultHTML) else {
+            // For manual corrections the search term IS the ISBN: store it even on notfound, so
+            // pendingISBNOverrides (`d.isbn <> o.isbn`) sees the override as applied instead of
+            // re-crawling the same dead ISBN on every refresh.
             ArchiveStore.shared.upsertMediaDetails(
-                mediaNumber: mediaNumber, isbn: "", coverPath: "",
+                mediaNumber: mediaNumber, isbn: source == "manual" ? cleanTerm : "", coverPath: "",
                 detail: .empty, source: source, status: "notfound")
             return
         }

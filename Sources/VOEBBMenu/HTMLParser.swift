@@ -195,9 +195,9 @@ enum HTMLParser {
         let recordID: String
     }
 
-    /// From a Trefferliste: the first result's ISBN + VLB cover URL (the cover `<img>` carries
-    /// the ISBN in its `data-src`) and its record id (`data-ajax`, for the optional
-    /// Vollanzeige). Returns nil when the search yields no ISBN-bearing result.
+    /// From a Trefferliste: the first cover-bearing result's ISBN + VLB cover URL (the cover
+    /// `<img>` carries the ISBN in its `data-src`) and that SAME record's id (`data-ajax`, for the
+    /// optional Vollanzeige). Returns nil when the search yields no ISBN-bearing result.
     static func parseCatalogResult(_ html: String) -> CatalogHit? {
         guard let isbnRange = html.range(of: #"/vlb/cover/(\d{10,13}[Xx]?)"#, options: .regularExpression) else {
             return nil
@@ -205,12 +205,23 @@ enum HTMLParser {
         let isbn = String(html[isbnRange]).replacingOccurrences(of: "/vlb/cover/", with: "")
         let coverURL = "https://www.voebb.de/vlb/cover/\(isbn)/m"
 
+        // Pick the data-ajax record id belonging to the SAME hit as the matched cover: the ISBN
+        // may come from hit #2 when hit #1 has no cover, so "first id on the page" could pair the
+        // cover with a different record's Vollanzeige. Nearest id before the cover wins (each
+        // hit's container precedes its cover image), else the first one after, else none.
         var recordID = ""
-        if let idRange = html.range(of: #"data-ajax="[A-Z0-9]+""#, options: .regularExpression) {
-            recordID = String(html[idRange])
-                .replacingOccurrences(of: "data-ajax=\"", with: "")
-                .replacingOccurrences(of: "\"", with: "")
+        let idRegex = try! NSRegularExpression(pattern: #"data-ajax="([A-Z0-9]+)""#)
+        var lastBefore: String?
+        var firstAfter: String?
+        for m in idRegex.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+            guard let whole = Range(m.range, in: html), let value = Range(m.range(at: 1), in: html) else { continue }
+            if whole.lowerBound < isbnRange.lowerBound {
+                lastBefore = String(html[value])
+            } else if firstAfter == nil {
+                firstAfter = String(html[value])
+            }
         }
+        recordID = lastBefore ?? firstAfter ?? ""
         return CatalogHit(isbn: isbn, coverURL: coverURL, recordID: recordID)
     }
 
