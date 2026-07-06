@@ -75,5 +75,19 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
+# Sign with a stable identity when one exists, so the Keychain recognises rebuilds as the SAME
+# app and stops re-prompting for the stored passwords/tokens after every deploy. One-time setup:
+# Schlüsselbundverwaltung → Zertifikatsassistent → "Ein Zertifikat erstellen …" → Name
+# "VOEBBMenu Dev", Typ "Codesignierung". Then click "Immer erlauben" once per Keychain item.
+# Override the identity with `SIGN_IDENTITY=... ./build_app.sh`; without a matching identity the
+# bundle stays ad-hoc signed (previous behaviour).
+SIGN_IDENTITY="${SIGN_IDENTITY:-VOEBBMenu Dev}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+    codesign --force --deep -s "$SIGN_IDENTITY" "$APP_DIR"
+    echo "Signed with identity: $SIGN_IDENTITY"
+else
+    echo "No signing identity '$SIGN_IDENTITY' found — leaving ad-hoc signature (Keychain will re-prompt after deploys)."
+fi
+
 echo "App bundle created at: $APP_DIR"
 echo "Launch with: open $APP_DIR"
