@@ -294,8 +294,16 @@ final class VOEBBSession {
         req.addValue("de-DE,de;q=0.9", forHTTPHeaderField: "Accept-Language")
         req.addValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
 
-        let (data, _) = try await session.data(for: req)
+        let (data, response) = try await session.data(for: req)
+        try Self.checkHTTP(response)
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+    }
+
+    /// Error pages (5xx/4xx) would otherwise be silently "parsed" as empty results.
+    static func checkHTTP(_ response: URLResponse) throws {
+        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            throw VOEBBError.networkError("HTTP \(http.statusCode)")
+        }
     }
 
     private func post(url: String, data: [String: String], referer: String) async throws -> String {
@@ -315,7 +323,8 @@ final class VOEBBSession {
             req.addValue(referer, forHTTPHeaderField: "Referer")
         }
 
-        let (data, _) = try await session.data(for: req)
+        let (data, response) = try await session.data(for: req)
+        try Self.checkHTTP(response)
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
     }
 

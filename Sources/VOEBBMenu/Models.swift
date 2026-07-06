@@ -51,8 +51,12 @@ struct Loan {
         dueDate < Calendar.current.startOfDay(for: Date())
     }
 
+    /// Volle Kalendertage bis zur Fälligkeit, ab Tagesbeginn gerechnet (konsistent mit
+    /// `isOverdue`): heute fällig = 0, morgen fällig = 1 — nicht beides 0 wie bei einer
+    /// Rechnung ab „jetzt" mit Uhrzeit.
     var daysUntilDue: Int {
-        max(0, Calendar.current.dateComponents([.day], from: Date(), to: dueDate).day ?? 0)
+        let today = Calendar.current.startOfDay(for: Date())
+        return max(0, Calendar.current.dateComponents([.day], from: today, to: dueDate).day ?? 0)
     }
 
     /// 📕 < 7 Tage  📙 7–14 Tage  📗 > 14 Tage

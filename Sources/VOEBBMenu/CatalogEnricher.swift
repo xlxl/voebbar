@@ -195,7 +195,8 @@ final class CatalogEnricher {
         req.setValue("de-DE,de;q=0.9", forHTTPHeaderField: "Accept-Language")
         req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
-        let (data, _) = try await session.data(for: req)
+        let (data, response) = try await session.data(for: req)
+        try VOEBBSession.checkHTTP(response)
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
     }
 
@@ -208,7 +209,8 @@ final class CatalogEnricher {
         req.setValue("de-DE,de;q=0.9", forHTTPHeaderField: "Accept-Language")
         req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
-        let (data, _) = try await session.data(for: req)
+        let (data, response) = try await session.data(for: req)
+        try VOEBBSession.checkHTTP(response)
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
     }
 

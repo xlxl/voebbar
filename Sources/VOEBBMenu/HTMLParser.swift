@@ -98,11 +98,12 @@ enum HTMLParser {
         var cardValid = ""
 
         // Pattern: Fällige Gebühren 1.00
-        // Also: 1.00 EUR at the end
-        let feePatterns = [
-            #"Fällige Gebühren\s+([\d,\.]+)"#,
-            #"([\d]+[,\.][\d]+)\s*EUR"#,
-        ]
+        // Fallback: a bare "1.00 EUR" — but ONLY on a page that talks about Gebühren at all,
+        // otherwise any unrelated EUR amount (e.g. a fee-schedule hint) would be picked up.
+        var feePatterns = [#"Fällige Gebühren\s+([\d,\.]+)"#]
+        if html.contains("Gebühr") {
+            feePatterns.append(#"([\d]+[,\.][\d]+)\s*EUR"#)
+        }
         for pattern in feePatterns {
             if let m = html.range(of: pattern, options: .regularExpression) {
                 let matchStr = String(html[m])

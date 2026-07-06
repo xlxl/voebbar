@@ -5,6 +5,10 @@ final class StatusBarController: NSObject {
     private var refreshTimer: Timer?
     var currentData: [AccountData] = []
     private var isLoading = false
+    /// True while the background enrichment (catalog crawl + Tonie images) of a refresh is still
+    /// running. Blocks a second refresh (timer / menuWillOpen / manual) from starting a parallel
+    /// crawl of the same targets — `isLoading` alone drops too early for that.
+    private var isEnriching = false
 
     private static let maxTitleLength = 40
 
@@ -53,7 +57,7 @@ final class StatusBarController: NSObject {
     // MARK: - Refresh
 
     func refresh() {
-        guard !isLoading else { return }
+        guard !isLoading, !isEnriching else { return }
 
         let accounts = AccountStorage.shared.accounts
         guard !accounts.isEmpty else {
@@ -95,6 +99,7 @@ final class StatusBarController: NSObject {
             await MainActor.run {
                 self.currentData = finalResults
                 self.isLoading = false
+                self.isEnriching = true
                 self.updateButton()
                 self.updateMenu()
                 OverviewWindowController.shared.reload(with: finalResults)
@@ -110,6 +115,7 @@ final class StatusBarController: NSObject {
             await ToniesEnricher.shared.enrichMissing()
 
             EnrichmentProgress.shared.stop()
+            await MainActor.run { self.isEnriching = false }
         }
     }
 
