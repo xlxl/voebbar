@@ -392,15 +392,20 @@ final class StatusBarController: NSObject {
     }
 
     private func buildRefreshTitle() -> String {
-        let lastUpdate = currentData.first?.lastUpdated
-        if let updated = lastUpdate {
+        var title = "Aktualisieren"
+        if let updated = currentData.first?.lastUpdated {
             let formatter = RelativeDateTimeFormatter()
             formatter.locale = Locale(identifier: "de_DE")
             formatter.unitsStyle = .short
             let ago = formatter.localizedString(for: updated, relativeTo: Date())
-            return "Aktualisieren (zuletzt \(ago))"
+            title = "Aktualisieren (zuletzt \(ago))"
         }
-        return "Aktualisieren"
+        // Kurzlebige Spur eines (evtl. im Hintergrund gelaufenen) Anreicherungslaufs.
+        let p = EnrichmentProgress.shared
+        if let at = p.lastRunAt, Date().timeIntervalSince(at) < 600, p.lastRunCount > 0 {
+            title += " · \(p.lastRunCount) neu angereichert"
+        }
+        return title
     }
 
     // MARK: - Actions
