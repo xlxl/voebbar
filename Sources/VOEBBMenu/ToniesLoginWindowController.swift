@@ -56,11 +56,12 @@ final class ToniesLoginWindowController: NSObject, NSWindowDelegate, WKNavigatio
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url,
-              let verifier = pkce?.verifier,
-              let code = ToniesAuth.authorizationCode(from: url) else {
+              let pkce,
+              let code = ToniesAuth.authorizationCode(from: url, expectedState: pkce.state) else {
             decisionHandler(.allow)
             return
         }
+        let verifier = pkce.verifier
 
         // Redirect back to our redirect_uri carrying the code: stop here (don't let the tonies SPA
         // load and consume the single-use code) and exchange it ourselves with our PKCE verifier.

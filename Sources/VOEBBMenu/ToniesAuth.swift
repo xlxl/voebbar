@@ -55,15 +55,19 @@ enum ToniesAuth {
     /// Extracts the `code` from a redirect back to `redirect_uri`. Keycloak returns it in the
     /// fragment (`#...code=...`) here, but we also accept a query for robustness. Returns nil for
     /// any other URL so the web view keeps navigating (login page, consent, etc.).
-    static func authorizationCode(from url: URL) -> String? {
+    /// The returned `state` must match the one we sent (CSRF guard) — a mismatch yields nil.
+    static func authorizationCode(from url: URL, expectedState: String) -> String? {
         guard url.absoluteString.hasPrefix(redirectURI) else { return nil }
         for part in [url.fragment, url.query] {
             guard let part else { continue }
             var comps = URLComponents()
             comps.percentEncodedQuery = part
-            if let code = comps.queryItems?.first(where: { $0.name == "code" })?.value, !code.isEmpty {
-                return code
+            guard let items = comps.queryItems,
+                  let code = items.first(where: { $0.name == "code" })?.value, !code.isEmpty else { continue }
+            if let state = items.first(where: { $0.name == "state" })?.value, state != expectedState {
+                return nil   // someone else's redirect — never exchange a foreign code
             }
+            return code
         }
         return nil
     }
@@ -84,8 +88,10 @@ enum ToniesAuth {
     }
 
     /// Trades the stored refresh token for a fresh access token, rotating and re-storing the
-    /// refresh token. Returns nil (and clears the stored token) if refreshing is no longer possible
-    /// — the UI then offers a re-login. Never throws, so an enrichment run degrades gracefully.
+    /// refresh token. Returns nil if refreshing isn't possible right now. The stored token is
+    /// cleared ONLY when the server rejects it (invalid_grant → expired/revoked) — a transient
+    /// failure (offline, 5xx) keeps it, so being offline never forces a re-login.
+    /// Never throws, so an enrichment run degrades gracefully.
     static func freshAccessToken() async -> String? {
         guard let refresh = KeychainHelper.load(for: keychainAccount) else { return nil }
         let form = [
@@ -93,17 +99,25 @@ enum ToniesAuth {
             "client_id": clientID,
             "refresh_token": refresh,
         ]
-        guard let token = try? await postToken(form) else {
-            // A hard failure (invalid_grant → refresh token expired/revoked): drop it so the UI
-            // shows "not connected" instead of retrying a dead token forever.
+        do {
+            let token = try await postToken(form)
+            KeychainHelper.save(password: token.refreshToken, for: keychainAccount)
+            return token.accessToken
+        } catch TokenError.invalidGrant {
+            // The token itself is dead: drop it so the UI shows "not connected" instead of
+            // retrying a dead token forever.
             KeychainHelper.delete(for: keychainAccount)
             return nil
+        } catch {
+            return nil   // transient (network/server) — keep the token, skip this run
         }
-        KeychainHelper.save(password: token.refreshToken, for: keychainAccount)
-        return token.accessToken
     }
 
     private struct Token { let accessToken: String; let refreshToken: String }
+
+    /// How a token request failed: `invalidGrant` = the server rejected the grant/token itself
+    /// (HTTP 400/401), everything else (network, 5xx, unparsable body) is `transient`.
+    enum TokenError: Error { case invalidGrant, transient }
 
     private static func postToken(_ form: [String: String]) async throws -> Token {
         var req = URLRequest(url: URL(string: "\(authBase)/token")!)
@@ -111,14 +125,17 @@ enum ToniesAuth {
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.httpBody = form.map { "\(urlEncode($0.key))=\(urlEncode($0.value))" }.joined(separator: "&").data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw VOEBBError.parseError("Tonies-Token-Anfrage fehlgeschlagen")
+        guard let (data, response) = try? await URLSession.shared.data(for: req) else {
+            throw TokenError.transient
+        }
+        guard let http = response as? HTTPURLResponse else { throw TokenError.transient }
+        guard http.statusCode == 200 else {
+            throw (http.statusCode == 400 || http.statusCode == 401) ? TokenError.invalidGrant : TokenError.transient
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let access = json["access_token"] as? String,
               let refresh = json["refresh_token"] as? String else {
-            throw VOEBBError.parseError("Tonies-Token-Antwort unlesbar")
+            throw TokenError.transient
         }
         return Token(accessToken: access, refreshToken: refresh)
     }
