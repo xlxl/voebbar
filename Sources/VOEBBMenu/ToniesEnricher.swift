@@ -28,7 +28,10 @@ final class ToniesEnricher {
 
         try? FileManager.default.createDirectory(at: ArchiveStore.coversDirectory, withIntermediateDirectories: true)
 
+        EnrichmentProgress.shared.start(phase: "Tonie-Bilder", total: targets.count)
+
         for target in targets {
+            defer { EnrichmentProgress.shared.step() }
             guard let match = bestMatch(for: target.title, in: tonies) else { continue }
             guard let path = await downloadImage(match.imageUrl, mediaNumber: target.mediaNumber) else { continue }
             ArchiveStore.shared.upsertToniImage(mediaNumber: target.mediaNumber, coverPath: path)

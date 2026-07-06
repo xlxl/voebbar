@@ -8,11 +8,16 @@ final class StatusBarController: NSObject {
 
     private static let maxTitleLength = 40
 
+    /// True while the background enrichment counter is showing, so we only rebuild the menu / restore
+    /// the button at the start/end of a run (not on every item).
+    private var enrichmentActive = false
+
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
         setupButton()
         updateButton()
+        EnrichmentProgress.shared.onChange = { [weak self] in self?.updateEnrichmentUI() }
     }
 
     // MARK: - Setup
@@ -103,6 +108,8 @@ final class StatusBarController: NSObject {
             // Tonie-Bilder aus my.tonies.com (nur wenn verbunden). Ein GraphQL-Call pro Refresh,
             // matcht neue Tonie-Ausleihen und lädt das Tonie-Bild in denselben Cover-Cache.
             await ToniesEnricher.shared.enrichMissing()
+
+            EnrichmentProgress.shared.stop()
         }
     }
 
@@ -183,6 +190,26 @@ final class StatusBarController: NSObject {
         button.title = ""
     }
 
+    /// Reflects background-enrichment progress on the status item: a live "k/N" counter in the
+    /// button while crawling, then restores the normal loan display. The menu is only rebuilt at the
+    /// start/end of a run (the button carries the live count).
+    func updateEnrichmentUI() {
+        let p = EnrichmentProgress.shared
+        if p.active {
+            if let button = statusItem.button {
+                button.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Reichere an …")
+                button.image?.isTemplate = true
+                button.title = " \(p.done)/\(p.total)"
+                button.toolTip = "Reichere \(p.phase) an … (\(p.done)/\(p.total))"
+            }
+            if !enrichmentActive { enrichmentActive = true; updateMenu() }
+        } else if enrichmentActive {
+            enrichmentActive = false
+            if !isLoading { updateButton() }
+            updateMenu()
+        }
+    }
+
     // MARK: - Menu
 
     func updateMenu() {
@@ -217,10 +244,15 @@ final class StatusBarController: NSObject {
         // Tonie-Bilder (my.tonies.com) — Verbindung verwalten
         addToniesSection(to: menu)
 
-        // Aktualisieren
-        let refreshTitle = buildRefreshTitle()
-        let refreshItem = NSMenuItem(title: refreshTitle, action: #selector(onRefresh), keyEquivalent: "r")
+        // Aktualisieren — während der Anreicherung stattdessen den Fortschritt zeigen (deaktiviert,
+        // damit man nicht erneut klickt).
+        let enriching = EnrichmentProgress.shared.active
+        let refreshItem = NSMenuItem(
+            title: enriching ? "Reichere \(EnrichmentProgress.shared.phase) an …" : buildRefreshTitle(),
+            action: enriching ? nil : #selector(onRefresh),
+            keyEquivalent: enriching ? "" : "r")
         refreshItem.target = self
+        refreshItem.isEnabled = !enriching
         menu.addItem(refreshItem)
 
         menu.addItem(.separator())

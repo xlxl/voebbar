@@ -35,16 +35,21 @@ final class CatalogEnricher {
 
         try? FileManager.default.createDirectory(at: ArchiveStore.coversDirectory, withIntermediateDirectories: true)
 
+        EnrichmentProgress.shared.start(phase: "Titel", total: overrides.count + targets.count + backfill.count)
+
         for o in overrides {
             await enrichOne(mediaNumber: o.mediaNumber, term: o.isbn, source: "manual")
+            EnrichmentProgress.shared.step()
             try? await Task.sleep(nanoseconds: politeDelay)
         }
         for t in targets {
             await enrichOne(mediaNumber: t.mediaNumber, term: t.title, source: "title")
+            EnrichmentProgress.shared.step()
             try? await Task.sleep(nanoseconds: politeDelay)
         }
         for b in backfill {
             await backfillOne(mediaNumber: b.mediaNumber, isbn: b.isbn)
+            EnrichmentProgress.shared.step()
             try? await Task.sleep(nanoseconds: politeDelay)
         }
     }
