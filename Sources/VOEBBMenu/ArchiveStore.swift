@@ -86,11 +86,25 @@ final class ArchiveStore {
             blurb        TEXT NOT NULL DEFAULT '',
             subjects     TEXT NOT NULL DEFAULT '',
             systematik   TEXT NOT NULL DEFAULT '',
-            source       TEXT NOT NULL DEFAULT '',   -- 'title' | 'isbn' | 'manual'
+            source       TEXT NOT NULL DEFAULT '',   -- 'title' | 'isbn' | 'manual' | 'tonie'
             status       TEXT NOT NULL DEFAULT '',   -- 'found' | 'notfound'
-            fetched_at   TEXT NOT NULL DEFAULT ''
+            fetched_at   TEXT NOT NULL DEFAULT '',
+            author          TEXT NOT NULL DEFAULT '',
+            published       TEXT NOT NULL DEFAULT '',   -- "Verlag, [Jahr]" (Fundus derives the year)
+            series          TEXT NOT NULL DEFAULT '',
+            interessenkreis TEXT NOT NULL DEFAULT '',   -- e.g. age recommendation
+            detail_version  INTEGER NOT NULL DEFAULT 0  -- bumped when the Vollanzeige fields are captured
         );
         """)
+        // Lightweight upgrade for DBs created before these columns existed. ALTER errors
+        // ("duplicate column") are ignored by exec() on a fresh DB that already has them.
+        for col in ["author TEXT NOT NULL DEFAULT ''",
+                    "published TEXT NOT NULL DEFAULT ''",
+                    "series TEXT NOT NULL DEFAULT ''",
+                    "interessenkreis TEXT NOT NULL DEFAULT ''",
+                    "detail_version INTEGER NOT NULL DEFAULT 0"] {
+            exec("ALTER TABLE media_details ADD COLUMN \(col);")
+        }
         // Manual ISBN corrections. The archive app WRITES these; voebbar reads them and
         // re-fetches the record by ISBN (unambiguous). Small shared contract, reverse direction.
         exec("""
@@ -100,7 +114,7 @@ final class ArchiveStore {
             created_at   TEXT NOT NULL DEFAULT ''
         );
         """)
-        exec("PRAGMA user_version=2;")
+        exec("PRAGMA user_version=3;")
     }
 
     // MARK: - Per-account write
@@ -294,24 +308,70 @@ final class ArchiveStore {
         }
     }
 
-    func upsertMediaDetails(mediaNumber: String, isbn: String, coverPath: String, blurb: String,
-                            subjects: String, systematik: String, source: String, status: String) {
+    func upsertMediaDetails(mediaNumber: String, isbn: String, coverPath: String,
+                            detail: HTMLParser.CatalogDetail, source: String, status: String) {
         queue.sync {
             guard db != nil else { return }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
             let sql = """
             INSERT INTO media_details
-                (media_number, isbn, cover_path, blurb, subjects, systematik, source, status, fetched_at)
-            VALUES (?,?,?,?,?,?,?,?,?)
+                (media_number, isbn, cover_path, blurb, subjects, systematik, source, status, fetched_at,
+                 author, published, series, interessenkreis, detail_version)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)
             ON CONFLICT(media_number) DO UPDATE SET isbn=excluded.isbn, cover_path=excluded.cover_path,
                 blurb=excluded.blurb, subjects=excluded.subjects, systematik=excluded.systematik,
-                source=excluded.source, status=excluded.status, fetched_at=excluded.fetched_at;
+                source=excluded.source, status=excluded.status, fetched_at=excluded.fetched_at,
+                author=excluded.author, published=excluded.published, series=excluded.series,
+                interessenkreis=excluded.interessenkreis, detail_version=excluded.detail_version;
             """
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-            bind(stmt, 1, mediaNumber); bind(stmt, 2, isbn); bind(stmt, 3, coverPath); bind(stmt, 4, blurb)
-            bind(stmt, 5, subjects); bind(stmt, 6, systematik); bind(stmt, 7, source); bind(stmt, 8, status)
+            bind(stmt, 1, mediaNumber); bind(stmt, 2, isbn); bind(stmt, 3, coverPath); bind(stmt, 4, detail.blurb)
+            bind(stmt, 5, detail.subjects); bind(stmt, 6, detail.systematik); bind(stmt, 7, source); bind(stmt, 8, status)
             bind(stmt, 9, Self.iso8601(Date()))
+            bind(stmt, 10, detail.author); bind(stmt, 11, detail.published); bind(stmt, 12, detail.series)
+            bind(stmt, 13, detail.interessenkreis)
+            sqlite3_step(stmt)
+        }
+    }
+
+    /// One-time backfill target: an already-enriched book whose Vollanzeige fields (author/…)
+    /// predate the columns. Re-fetched by ISBN (unambiguous); the cover/source/status stay put.
+    struct DetailTarget { let mediaNumber: String; let isbn: String }
+
+    func mediaNeedingDetailBackfill() -> [DetailTarget] {
+        return queue.sync {
+            guard db != nil else { return [] }
+            var out: [DetailTarget] = []
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            SELECT media_number, isbn FROM media_details
+            WHERE detail_version < 1 AND status = 'found' AND isbn <> '' AND source <> 'tonie';
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(DetailTarget(mediaNumber: col(stmt, 0), isbn: col(stmt, 1)))
+            }
+            return out
+        }
+    }
+
+    /// Backfill: refresh only the Vollanzeige text fields (cover/source/status/isbn untouched)
+    /// and mark the row as up to date.
+    func updateDetailFields(mediaNumber: String, detail: HTMLParser.CatalogDetail) {
+        queue.sync {
+            guard db != nil else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            UPDATE media_details SET blurb=?, subjects=?, systematik=?, author=?, published=?,
+                series=?, interessenkreis=?, detail_version=1 WHERE media_number=?;
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            bind(stmt, 1, detail.blurb); bind(stmt, 2, detail.subjects); bind(stmt, 3, detail.systematik)
+            bind(stmt, 4, detail.author); bind(stmt, 5, detail.published); bind(stmt, 6, detail.series)
+            bind(stmt, 7, detail.interessenkreis); bind(stmt, 8, mediaNumber)
             sqlite3_step(stmt)
         }
     }

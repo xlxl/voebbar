@@ -214,18 +214,37 @@ enum HTMLParser {
         return CatalogHit(isbn: isbn, coverURL: coverURL, recordID: recordID)
     }
 
-    struct CatalogDetail { let blurb: String; let subjects: String; let systematik: String }
+    struct CatalogDetail {
+        let blurb: String
+        let subjects: String
+        let systematik: String
+        let author: String
+        let published: String
+        let series: String
+        let interessenkreis: String
 
-    /// From a Vollanzeige: the optional blurb (Inhalt), subjects (Schlagwörter) and shelf
-    /// classification (Verbundsystematik). Fields are `<tr><th scope="row">L</th><td>…</td></tr>`.
+        static let empty = CatalogDetail(blurb: "", subjects: "", systematik: "",
+                                         author: "", published: "", series: "", interessenkreis: "")
+    }
+
+    /// From a Vollanzeige: blurb (Inhalt), subjects (Schlagwörter), shelf classification
+    /// (Verbundsystematik), author (Verfasser), publication (Veröffentlichung → holds the year),
+    /// series (Reihe) and target-audience/age (Interessenkreis). Fields are
+    /// `<tr><th scope="row">L</th><td>…</td></tr>`; every field is optional.
     static func parseVollanzeige(_ html: String) -> CatalogDetail {
         // VÖBB labels the thematic subjects "Schlagwortkette" (older records: "Schlagwörter").
         var subjects = vollField(html, "Schlagwortkette")
         if subjects.isEmpty { subjects = vollField(html, "Schlagwörter") }
+        var series = vollField(html, "Reihe")
+        if series.isEmpty { series = vollField(html, "Gesamttitel") }
         return CatalogDetail(
             blurb: vollField(html, "Inhalt"),
             subjects: subjects,
-            systematik: vollField(html, "Verbundsystematik")
+            systematik: vollField(html, "Verbundsystematik"),
+            author: vollField(html, "Verfasser"),
+            published: vollField(html, "Veröffentlichung"),
+            series: series,
+            interessenkreis: vollField(html, "Interessenkreis")
         )
     }
 

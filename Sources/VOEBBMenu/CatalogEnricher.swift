@@ -27,8 +27,11 @@ final class CatalogEnricher {
         let overrideNumbers = Set(overrides.map(\.mediaNumber))
         let targets = ArchiveStore.shared.mediaNeedingEnrichment()
             .filter { !overrideNumbers.contains($0.mediaNumber) }
+        // Books enriched before the author/year/… columns existed: fill them once, by ISBN.
+        let backfill = ArchiveStore.shared.mediaNeedingDetailBackfill()
+            .filter { !overrideNumbers.contains($0.mediaNumber) }
 
-        guard !overrides.isEmpty || !targets.isEmpty else { return }
+        guard !overrides.isEmpty || !targets.isEmpty || !backfill.isEmpty else { return }
 
         try? FileManager.default.createDirectory(at: ArchiveStore.coversDirectory, withIntermediateDirectories: true)
 
@@ -38,6 +41,10 @@ final class CatalogEnricher {
         }
         for t in targets {
             await enrichOne(mediaNumber: t.mediaNumber, term: t.title, source: "title")
+            try? await Task.sleep(nanoseconds: politeDelay)
+        }
+        for b in backfill {
+            await backfillOne(mediaNumber: b.mediaNumber, isbn: b.isbn)
             try? await Task.sleep(nanoseconds: politeDelay)
         }
     }
@@ -56,13 +63,13 @@ final class CatalogEnricher {
 
         guard let hit = HTMLParser.parseCatalogResult(resultHTML) else {
             ArchiveStore.shared.upsertMediaDetails(
-                mediaNumber: mediaNumber, isbn: "", coverPath: "", blurb: "", subjects: "",
-                systematik: "", source: source, status: "notfound")
+                mediaNumber: mediaNumber, isbn: "", coverPath: "",
+                detail: .empty, source: source, status: "notfound")
             return
         }
 
-        // Optional: open the Vollanzeige for blurb / subjects / shelf classification.
-        var detail = HTMLParser.CatalogDetail(blurb: "", subjects: "", systematik: "")
+        // Optional: open the Vollanzeige for blurb / subjects / author / year / …
+        var detail = HTMLParser.CatalogDetail.empty
         if !hit.recordID.isEmpty,
            let vollHTML = try? await openVollanzeige(recordID: hit.recordID, term: cleanTerm, trefferliste: resultHTML, ctx: ctx) {
             detail = HTMLParser.parseVollanzeige(vollHTML)
@@ -71,8 +78,19 @@ final class CatalogEnricher {
         let coverPath = await downloadCover(hit.coverURL, mediaNumber: mediaNumber, session: ctx.session) ?? ""
         ArchiveStore.shared.upsertMediaDetails(
             mediaNumber: mediaNumber, isbn: hit.isbn, coverPath: coverPath,
-            blurb: detail.blurb, subjects: detail.subjects, systematik: detail.systematik,
-            source: source, status: "found")
+            detail: detail, source: source, status: "found")
+    }
+
+    /// Re-opens the Vollanzeige of an already-enriched book (by its unambiguous ISBN) to fill the
+    /// newer fields (author/year/…). Updates text fields only — the cover isn't re-downloaded.
+    private func backfillOne(mediaNumber: String, isbn: String) async {
+        guard let ctx = try? await bootstrap(),
+              let resultHTML = try? await search(term: isbn, ctx: ctx),
+              let hit = HTMLParser.parseCatalogResult(resultHTML), !hit.recordID.isEmpty,
+              let vollHTML = try? await openVollanzeige(recordID: hit.recordID, term: isbn, trefferliste: resultHTML, ctx: ctx) else {
+            return // transient failure → left for a later run (detail_version stays < 1)
+        }
+        ArchiveStore.shared.updateDetailFields(mediaNumber: mediaNumber, detail: HTMLParser.parseVollanzeige(vollHTML))
     }
 
     /// Opens the full record from a Trefferliste (re-POST the page's hidden inputs plus the
