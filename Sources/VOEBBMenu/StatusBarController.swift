@@ -366,6 +366,27 @@ final class StatusBarController: NSObject {
             subItem.submenu = submenu
             menu.addItem(subItem)
         }
+
+        // Aufschlüsselung nach Bibliothek — damit man vor der Abgabe weiß, wie viele Medien
+        // pro Standort herauszusuchen sind.
+        if !data.loans.isEmpty {
+            let byLibrary = Dictionary(grouping: data.loans, by: { $0.library })
+                .map { (library: $0.key, count: $0.value.count) }
+                .sorted { $0.count != $1.count ? $0.count > $1.count : $0.library < $1.library }
+
+            let libItem = NSMenuItem(title: "  📍  Nach Bibliothek", action: nil, keyEquivalent: "")
+            let libMenu = NSMenu()
+            for entry in byLibrary {
+                let name = entry.library.isEmpty ? "Unbekannte Bibliothek" : entry.library
+                let row = NSMenuItem(title: "\(truncate(name, to: Self.maxTitleLength)): \(entry.count)",
+                                     action: nil, keyEquivalent: "")
+                row.toolTip = "\(name): \(entry.count) Medi\(entry.count == 1 ? "um" : "en")"
+                row.isEnabled = false
+                libMenu.addItem(row)
+            }
+            libItem.submenu = libMenu
+            menu.addItem(libItem)
+        }
     }
 
     // MARK: - Helpers
