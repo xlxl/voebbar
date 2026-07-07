@@ -31,7 +31,11 @@ final class VOEBBSession {
 
     // MARK: - Public API
 
-    func fetchAccountData(password: String) async throws -> AccountData {
+    /// Distinctive prefix for the parse-monitor errors so callers can tell "our scraping broke"
+    /// apart from ordinary login/network failures (and notify about it).
+    static let parseBrokenMarker = "Ausleihen nicht lesbar"
+
+    func fetchAccountData(password: String, previousLoanCount: Int? = nil) async throws -> AccountData {
         let (appURL, overviewHTML) = try await login(password: password)
         var data = AccountData(account: account)
 
@@ -43,6 +47,20 @@ final class VOEBBSession {
         if loanCount != 0 {
             let (loansHTML, loansURL) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZA", rc: 3)
             var parsed = HTMLParser.parseLoans(loansHTML)
+
+            // Parse-Monitor: käme hier fälschlich eine leere Liste durch, würde das Archiv ALLE
+            // offenen Ausleihen als zurückgegeben schließen — Historienschaden. Zwei Fälle:
+            // (a) Übersicht sagt N > 0, aber die Ausleihen-Tabelle ist unparsebar → Markup-Bruch.
+            // (b) Übersicht selbst unlesbar (nil) UND vorher gab es Ausleihen → konservativ
+            //     ebenfalls Fehler (echte Komplett-Rückgabe läuft über loanCount == 0).
+            if parsed.isEmpty {
+                if let n = loanCount, n > 0 {
+                    throw VOEBBError.parseError("\(Self.parseBrokenMarker) (Übersicht meldet \(n)) – VÖBB-Markup geändert? Archiv bleibt unangetastet.")
+                }
+                if loanCount == nil, let prev = previousLoanCount, prev > 0 {
+                    throw VOEBBError.parseError("\(Self.parseBrokenMarker) (vorher \(prev), Übersicht unlesbar) – VÖBB-Markup geändert? Archiv bleibt unangetastet.")
+                }
+            }
 
             // Gebühren: von der Ausleihseite aus (rc=4) falls Bücher gefunden,
             // sonst von der Übersicht (rc=3) – Fallback falls *SZA kein loans-HTML lieferte

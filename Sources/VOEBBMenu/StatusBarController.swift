@@ -70,6 +70,11 @@ final class StatusBarController: NSObject {
         isLoading = true
         updateButtonForLoading()
 
+        // Vorherige Ausleihzahlen (auf dem Main-Thread erfasst) für den Parse-Monitor.
+        let previousCounts = Dictionary(uniqueKeysWithValues: currentData.map {
+            ($0.account.cardNumber, $0.loans.count)
+        })
+
         Task {
             var results: [AccountData] = []
             for account in accounts {
@@ -81,7 +86,9 @@ final class StatusBarController: NSObject {
                 }
                 do {
                     let voebbSession = VOEBBSession(account: account)
-                    let data = try await voebbSession.fetchAccountData(password: password)
+                    let data = try await voebbSession.fetchAccountData(
+                        password: password,
+                        previousLoanCount: previousCounts[account.cardNumber])
                     results.append(data)
                 } catch {
                     var data = AccountData(account: account)
@@ -104,6 +111,7 @@ final class StatusBarController: NSObject {
                 self.updateMenu()
                 OverviewWindowController.shared.reload(with: finalResults)
                 self.notifyDueSoonIfNeeded(finalResults)
+                self.notifyParseFailures(finalResults)
             }
 
             // Anreicherung (ISBN/Cover aus dem VÖBB-Katalog) im Hintergrund, nachdem die UI
@@ -249,6 +257,25 @@ final class StatusBarController: NSObject {
         var lines = due.prefix(4).map { "• \(truncate($0.title, to: 40)) (bis \($0.dueDateString))" }
         if due.count > 4 { lines.append("… und \(due.count - 4) weitere") }
         NotificationManager.shared.notify(title: title, body: lines.joined(separator: "\n"))
+    }
+
+    /// Loud alert when the loans page stopped being parseable (VÖBB markup change) — the account
+    /// shows the ⚠️ in the menu anyway, but a notification is noticed without opening it.
+    /// At most one notification per account and day.
+    private func notifyParseFailures(_ results: [AccountData]) {
+        let broken = results.filter { $0.error?.contains(VOEBBSession.parseBrokenMarker) == true }
+        guard !broken.isEmpty else { return }
+
+        let day = ISO8601DateFormatter().string(from: Date()).prefix(10)
+        let keys = Set(broken.map { "\($0.account.cardNumber)|\(day)" })
+        let defaults = UserDefaults.standard
+        let notified = Set(defaults.stringArray(forKey: "voebb_parsefail_notified") ?? [])
+        guard !keys.subtracting(notified).isEmpty else { return }
+        defaults.set(Array(keys), forKey: "voebb_parsefail_notified")
+
+        NotificationManager.shared.notify(
+            title: "⚠️ VÖBB-Abruf defekt?",
+            body: "Die Ausleihen-Seite konnte nicht gelesen werden (Markup geändert?). Das Archiv bleibt unangetastet — bitte prüfen.")
     }
 
     // MARK: - Menu
