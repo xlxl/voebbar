@@ -103,6 +103,7 @@ final class StatusBarController: NSObject {
                 self.updateButton()
                 self.updateMenu()
                 OverviewWindowController.shared.reload(with: finalResults)
+                self.notifyDueSoonIfNeeded(finalResults)
             }
 
             // Anreicherung (ISBN/Cover aus dem VÖBB-Katalog) im Hintergrund, nachdem die UI
@@ -214,6 +215,40 @@ final class StatusBarController: NSObject {
             if !isLoading { updateButton() }
             updateMenu()
         }
+    }
+
+    // MARK: - Notifications (due soon / overdue)
+
+    private static let notifiedKey = "voebb_notified_v1"
+
+    /// One aggregated notification per refresh when loans are due soon or overdue — but only if
+    /// at least one of them wasn't announced before. Dedupe keys are `mediaNumber|dueDate`, so a
+    /// renewal (new due date) re-arms the item; the stored set is pruned to the current loans.
+    private func notifyDueSoonIfNeeded(_ results: [AccountData]) {
+        guard AccountStorage.shared.notificationsEnabled else { return }
+        let threshold = AccountStorage.shared.renewalDueDays
+
+        let due = results.filter { $0.error == nil }
+            .flatMap(\.loans)
+            .filter { $0.isOverdue || $0.daysUntilDue <= threshold }
+            .sorted { $0.dueDate < $1.dueDate }
+        let keys = Set(due.map { "\($0.mediaNumber)|\($0.dueDateString)" })
+
+        let defaults = UserDefaults.standard
+        let previous = Set(defaults.stringArray(forKey: Self.notifiedKey) ?? [])
+        defaults.set(Array(keys), forKey: Self.notifiedKey)   // prune + remember current state
+        guard !due.isEmpty, !keys.subtracting(previous).isEmpty else { return }
+
+        let overdue = due.filter(\.isOverdue).count
+        let soon = due.count - overdue
+        var titleParts: [String] = []
+        if overdue > 0 { titleParts.append("⚠️ \(overdue) überfällig") }
+        if soon > 0 { titleParts.append("\(soon) bald fällig") }
+        let title = titleParts.joined(separator: " · ")
+
+        var lines = due.prefix(4).map { "• \(truncate($0.title, to: 40)) (bis \($0.dueDateString))" }
+        if due.count > 4 { lines.append("… und \(due.count - 4) weitere") }
+        NotificationManager.shared.notify(title: title, body: lines.joined(separator: "\n"))
     }
 
     // MARK: - Menu

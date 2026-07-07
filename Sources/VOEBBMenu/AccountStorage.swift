@@ -12,6 +12,14 @@ final class AccountStorage {
     private let key = "voebb_accounts_v1"
     private let intervalKey = "voebb_refresh_interval_hours"
     private let renewalDueDaysKey = "voebb_renewal_due_days"
+    private let notificationsKey = "voebb_notifications"
+
+    /// Mitteilungen bei bald fälligen/überfälligen Medien. Default an — das eigentliche Opt-in
+    /// ist der macOS-Berechtigungsdialog beim ersten Auslösen.
+    var notificationsEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: notificationsKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: notificationsKey) }
+    }
 
     var refreshIntervalHours: Double {
         get {

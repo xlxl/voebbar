@@ -4,6 +4,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBarController: StatusBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        _ = NotificationManager.shared   // Delegate früh setzen (Klick auf Mitteilungen)
         statusBarController = StatusBarController()
         PreferencesWindowController.shared.setStatusBarController(statusBarController!)
         statusBarController?.startRefreshing()

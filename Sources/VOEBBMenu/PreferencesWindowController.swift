@@ -104,6 +104,13 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
             y: 58, startX: rowStartX, endX: rowEndX, action: #selector(onRenewalDaysButtonTapped(_:))
         )
 
+        // Notifications checkbox (bottom-left, sharing the row with the close button).
+        let notifyCheck = NSButton(checkboxWithTitle: "Bei fälligen Medien benachrichtigen",
+                                   target: self, action: #selector(onToggleNotifications(_:)))
+        notifyCheck.frame = NSRect(x: 16, y: 20, width: 300, height: 20)
+        notifyCheck.state = AccountStorage.shared.notificationsEnabled ? .on : .off
+        contentView.addSubview(notifyCheck)
+
         // Close button
         let closeBtn = NSButton(title: "Schließen", target: self, action: #selector(onClose))
         closeBtn.frame = NSRect(x: contentView.frame.width - 116, y: 16, width: 100, height: 26)
@@ -185,6 +192,10 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
     @objc private func onAdd() {
         showAddAccountSheet()
+    }
+
+    @objc private func onToggleNotifications(_ sender: NSButton) {
+        AccountStorage.shared.notificationsEnabled = sender.state == .on
     }
 
     @objc private func onRemove() {
