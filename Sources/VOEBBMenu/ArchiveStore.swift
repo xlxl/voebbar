@@ -318,7 +318,7 @@ final class ArchiveStore {
             INSERT INTO media_details
                 (media_number, isbn, cover_path, blurb, subjects, systematik, source, status, fetched_at,
                  author, published, series, interessenkreis, detail_version)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,2)
             ON CONFLICT(media_number) DO UPDATE SET isbn=excluded.isbn, cover_path=excluded.cover_path,
                 blurb=excluded.blurb, subjects=excluded.subjects, systematik=excluded.systematik,
                 source=excluded.source, status=excluded.status, fetched_at=excluded.fetched_at,
@@ -335,8 +335,11 @@ final class ArchiveStore {
         }
     }
 
-    /// One-time backfill target: an already-enriched book whose Vollanzeige fields (author/…)
-    /// predate the columns. Re-fetched by ISBN (unambiguous); the cover/source/status stay put.
+    /// One-time backfill target: an already-enriched book whose Vollanzeige fields predate the
+    /// current parser. Re-fetched by ISBN (unambiguous); the cover/source/status stay put.
+    /// `detail_version` marks the parser generation: 1 = author/year/… columns, 2 = the
+    /// "Zusammenfassung" blurb fallback. Only blurb-less rows are re-fetched for gen 2, so books
+    /// that already have a Klappentext (from "Inhalt") aren't touched.
     struct DetailTarget { let mediaNumber: String; let isbn: String }
 
     func mediaNeedingDetailBackfill() -> [DetailTarget] {
@@ -347,7 +350,7 @@ final class ArchiveStore {
             defer { sqlite3_finalize(stmt) }
             let sql = """
             SELECT media_number, isbn FROM media_details
-            WHERE detail_version < 1 AND status = 'found' AND isbn <> '' AND source <> 'tonie';
+            WHERE detail_version < 2 AND blurb = '' AND status = 'found' AND isbn <> '' AND source <> 'tonie';
             """
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -366,7 +369,7 @@ final class ArchiveStore {
             defer { sqlite3_finalize(stmt) }
             let sql = """
             UPDATE media_details SET blurb=?, subjects=?, systematik=?, author=?, published=?,
-                series=?, interessenkreis=?, detail_version=1 WHERE media_number=?;
+                series=?, interessenkreis=?, detail_version=2 WHERE media_number=?;
             """
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
             bind(stmt, 1, detail.blurb); bind(stmt, 2, detail.subjects); bind(stmt, 3, detail.systematik)

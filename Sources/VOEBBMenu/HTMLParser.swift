@@ -249,8 +249,11 @@ enum HTMLParser {
         if subjects.isEmpty { subjects = vollField(html, "Schlagwörter") }
         var series = vollField(html, "Reihe")
         if series.isEmpty { series = vollField(html, "Gesamttitel") }
+        // Der Klappentext steht mal unter "Inhalt", mal unter "Zusammenfassung".
+        var blurb = vollField(html, "Inhalt")
+        if blurb.isEmpty { blurb = vollField(html, "Zusammenfassung") }
         return CatalogDetail(
-            blurb: vollField(html, "Inhalt"),
+            blurb: blurb,
             subjects: subjects,
             systematik: vollField(html, "Verbundsystematik"),
             author: vollField(html, "Verfasser"),
