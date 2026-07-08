@@ -252,12 +252,24 @@ enum HTMLParser {
         // Der Klappentext steht mal unter "Inhalt", mal unter "Zusammenfassung".
         var blurb = vollField(html, "Inhalt")
         if blurb.isEmpty { blurb = vollField(html, "Zusammenfassung") }
+        // "Veröffentlichung" kommt in manchen Datensätzen zweimal vor (Verlag + Jahr, in getrennten
+        // Tabellen) → alle Zeilen zusammenfassen, damit die Jahreszahl mitkommt; notfalls das Jahr
+        // aus einem separaten Feld nachziehen.
+        var published = vollFieldAll(html, "Veröffentlichung", join: ", ")
+        if published.range(of: #"\d{4}"#, options: .regularExpression) == nil {
+            for yearLabel in ["Erscheinungsjahr", "Jahr"] {
+                let y = vollField(html, yearLabel)
+                if !y.isEmpty { published = published.isEmpty ? y : "\(published), \(y)"; break }
+            }
+        }
         return CatalogDetail(
             blurb: blurb,
             subjects: subjects,
             systematik: vollField(html, "Verbundsystematik"),
-            author: vollField(html, "Verfasser"),
-            published: vollField(html, "Veröffentlichung"),
+            // Mehrere Verfasser stehen als <a>…</a><br><a>…</a> in einer Zelle (oder in mehreren
+            // Verfasser-Zeilen) → mit "; " trennen statt zu einem Namen zu verschmelzen.
+            author: vollFieldAll(html, "Verfasser", join: "; "),
+            published: published,
             series: series,
             interessenkreis: vollField(html, "Interessenkreis")
         )
@@ -269,6 +281,25 @@ enum HTMLParser {
               let m = re.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
               let r = Range(m.range(at: 1), in: html) else { return "" }
         return stripHTML(String(html[r]))
+    }
+
+    /// Like `vollField`, but collects **every** `<th>label</th><td>…</td>` row and splits each cell
+    /// on `<br>` — so repeated fields (a second "Veröffentlichung" row for the year) and multiple
+    /// `<br>`-separated entries in one cell (co-authors) are all captured. Deduped, non-empty,
+    /// joined with `separator`.
+    private static func vollFieldAll(_ html: String, _ label: String, join separator: String) -> String {
+        let pattern = "<th[^>]*>\\s*\(NSRegularExpression.escapedPattern(for: label))\\s*</th>\\s*<td[^>]*>(.*?)</td>"
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators, .caseInsensitive]) else { return "" }
+        var parts: [String] = []
+        for m in re.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+            guard let r = Range(m.range(at: 1), in: html) else { continue }
+            let cell = String(html[r]).replacingOccurrences(of: #"(?i)<br\s*/?>"#, with: "\u{1}", options: .regularExpression)
+            for piece in cell.components(separatedBy: "\u{1}") {
+                let clean = stripHTML(piece)
+                if !clean.isEmpty, !parts.contains(clean) { parts.append(clean) }
+            }
+        }
+        return parts.joined(separator: separator)
     }
 
     // MARK: - Helpers
