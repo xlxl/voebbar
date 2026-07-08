@@ -81,8 +81,10 @@ PLIST
 # "VOEBBMenu Dev", Typ "Codesignierung". Then click "Immer erlauben" once per Keychain item.
 # Override the identity with `SIGN_IDENTITY=... ./build_app.sh`; without a matching identity the
 # bundle stays ad-hoc signed (previous behaviour).
+# Note: NOT `-v` — a self-signed cert is CSSMERR_TP_NOT_TRUSTED and would be filtered out, but
+# codesign happily signs with it locally and only a *stable* identity matters for the Keychain.
 SIGN_IDENTITY="${SIGN_IDENTITY:-VOEBBMenu Dev}"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+if security find-identity -p codesigning 2>/dev/null | grep -q "\"$SIGN_IDENTITY\""; then
     codesign --force --deep -s "$SIGN_IDENTITY" "$APP_DIR"
     echo "Signed with identity: $SIGN_IDENTITY"
 else
