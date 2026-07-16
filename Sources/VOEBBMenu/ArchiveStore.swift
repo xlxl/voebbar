@@ -270,23 +270,46 @@ final class ArchiveStore {
     func toniesNeedingImage() -> [EnrichTarget] {
         return queue.sync {
             guard db != nil else { return [] }
-            var out: [EnrichTarget] = []
-            var stmt: OpaquePointer?
-            defer { sqlite3_finalize(stmt) }
+            // Also honour a Fundus media-type correction to "Tonie": a Tonie that VÖBB catalogues
+            // under a non-Tonie type (e.g. "Gerät") is invisible to the media_type gate, but the user
+            // can mark it as a Tonie in Fundus (fundus_media_types). That table is Fundus-owned, so we
+            // only join it when it actually exists — otherwise a LEFT JOIN on a missing table would
+            // fail `prepare` and silently kill Tonie enrichment for everyone. The override is purely
+            // additive: it can pull an item INTO the pass, never remove one VÖBB already types Tonie.
+            let hasOverrides = tableExists("fundus_media_types")
+            let overrideJoin = hasOverrides
+                ? "LEFT JOIN fundus_media_types f ON f.media_number = b.media_number"
+                : ""
+            let overrideMatch = hasOverrides ? " OR f.media_type = 'Tonie'" : ""
             let sql = """
             SELECT b.media_number, b.title FROM borrow_events b
             LEFT JOIN media_details d ON d.media_number = b.media_number
+            \(overrideJoin)
             WHERE b.media_number <> ''
-              AND (b.media_type = 'Tonie' OR b.media_type LIKE '%Hörbuch%' OR b.media_type LIKE '%CD%')
+              AND (b.media_type = 'Tonie' OR b.media_type LIKE '%Hörbuch%' OR b.media_type LIKE '%CD%'\(overrideMatch))
               AND NOT (d.source = 'tonie' AND d.cover_path <> '')
             GROUP BY b.media_number;
             """
+            var out: [EnrichTarget] = []
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             while sqlite3_step(stmt) == SQLITE_ROW {
                 out.append(EnrichTarget(mediaNumber: col(stmt, 0), title: col(stmt, 1)))
             }
             return out
         }
+    }
+
+    /// Whether a table exists in the shared DB. Lets us optionally read a Fundus-owned table without
+    /// creating it or failing `prepare` when Fundus has never run. MUST be called on `queue` (it uses
+    /// `db` directly and must not re-enter `queue.sync`).
+    private func tableExists(_ name: String) -> Bool {
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK else { return false }
+        bind(stmt, 1, name)
+        return sqlite3_step(stmt) == SQLITE_ROW
     }
 
     /// Sets a Tonie's cover image without clobbering any book fields (isbn/blurb/… stay untouched on
