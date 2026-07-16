@@ -47,6 +47,41 @@ Both VÖBB renewal buttons ("Alle verlängern" and "Markierte Medien verlängern
 - `KeychainHelper` — passwords, keyed by card number, Keychain service `de.voebb.menubar`. Passwords never touch UserDefaults.
 - The bundle id `de.voebb.menubar` is shared between `KeychainHelper`'s service name and `Info.plist` — if one changes, existing saved passwords become unreachable via Keychain lookup.
 
+### Archive & enrichment layer (feeds the companion app Fundus)
+
+This fork adds an archive layer on top of the loan scraping. It shares **one SQLite file** with the
+reader app **Fundus** (`/Users/tim/Github/Fundus`) — no shared code, no IPC. `ArchiveStore` is the
+entire contract.
+
+- **`ArchiveStore` (`ArchiveStore.swift`)** — `~/Library/Application Support/de.voebb.menubar/archive.sqlite`
+  (WAL). On each successful refresh, `record()` upserts current loans into `borrow_events` and
+  reconciles returns (open rows of a **successfully fetched** account no longer seen → `is_open=0`;
+  an account with a fetch *error* is skipped entirely, never mass-closed). voebbar owns and writes
+  `borrow_events` and `media_details`; Fundus reads them and adds its own `fundus_*` tables to the
+  same DB. The only thing voebbar reads back from Fundus is **`media_isbn_override`** — it does not
+  read any `fundus_*` table.
+- **Enrichment runs after each refresh**, orchestrated in `StatusBarController.refresh()`:
+  first `CatalogEnricher.enrichMissing()`, then `ToniesEnricher.enrichMissing()`.
+  - **`CatalogEnricher`** — anonymous scrape of VÖBB's **public catalog** (`www.voebb.de/aDISWeb`,
+    same fragile aDIS form/session mechanics as `VOEBBService`). Strictly **incremental**: only items
+    with no `media_details` row yet. Three passes: pending `media_isbn_override`s (search by ISBN,
+    lock `source='manual'`), then new items (search by **title**, `source='title'`), then a one-time
+    Vollanzeige backfill for older `detail_version`s. A successful-but-empty search records
+    `status='notfound'` so it is never re-crawled; a network error leaves the item for a later run.
+  - **`ToniesEnricher`** — Tonie cover images from **my.tonies.com** (GraphQL, OAuth via
+    `ToniesAuth`, one call per refresh). The Tonie chip id is unrelated to the VÖBB barcode, so the
+    only join is a **fuzzy title-token match** (`ToniesEnricher.tokens` / `bestMatch`, confident hits
+    only; unmatched candidates are *not* locked as notfound). Sets `source='tonie'`.
+- **The Tonie-image gate:** `ArchiveStore.toniesNeedingImage()` selects candidates by the raw VÖBB
+  `borrow_events.media_type` (`= 'Tonie'` OR `LIKE '%Hörbuch%'` OR `LIKE '%CD%'`). A Tonie that VÖBB
+  catalogues under any other type (e.g. **`Gerät`**) would otherwise never enter the Tonie image pass
+  and only get the coverless `source='title'` catalog record. To cover that, the query **also**
+  honours a Fundus media-type correction: it LEFT JOINs the Fundus-owned `fundus_media_types` and
+  includes rows whose override is `'Tonie'`. The join is added only when that table exists (guarded
+  via `tableExists`), so a DB without Fundus behaves exactly as before instead of failing `prepare`.
+  The override is purely additive — it can pull an item into the pass, never remove one VÖBB already
+  types as a Tonie. (A match still requires the Tonie to be in the user's my.tonies.com collection.)
+
 ### UI controllers
 All windows are built by hand with explicit `NSRect` frames (no `.xib`/storyboard, minimal Auto Layout) — adjusting one element's position usually means recomputing the y-coordinates of everything below/above it in the same window.
 
