@@ -1,4 +1,7 @@
 import Foundation
+import ImageIO
+import CoreImage
+import Vision
 
 /// Fills cover images for borrowed **Tonies** (and CD/Hörbuch items that are actually Tonies) from
 /// the my.tonies.com collection — a clean JSON GraphQL API, unlike the VÖBB HTML scraping.
@@ -143,6 +146,38 @@ final class ToniesEnricher {
             return nil
         }
         let fileURL = ArchiveStore.coversDirectory.appendingPathComponent("\(mediaNumber).jpg")
-        do { try data.write(to: fileURL); return fileURL.path } catch { return nil }
+        do { try data.write(to: fileURL) } catch { return nil }
+        removeBackgroundIfFlattened(at: fileURL)
+        return fileURL.path
+    }
+
+    /// Most Tonie renders from my.tonies.com already have a transparent background, but a few ship as
+    /// a flattened product photo on solid white (with a drop shadow). When the just-downloaded cover
+    /// has no alpha channel, lift the subject with Vision so it matches the transparent ones. Applied
+    /// in place, best-effort: any failure — or macOS < 14, where the API is unavailable — leaves the
+    /// original file untouched.
+    private func removeBackgroundIfFlattened(at fileURL: URL) {
+        guard let src = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return }
+        switch cg.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast: break   // opaque → worth de-backgrounding
+        default: return                                    // already transparent, leave it
+        }
+        guard #available(macOS 14.0, *) else { return }
+        do {
+            let request = VNGenerateForegroundInstanceMaskRequest()
+            let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+            try handler.perform([request])
+            guard let result = request.results?.first else { return }
+            let masked = try result.generateMaskedImage(ofInstances: result.allInstances,
+                                                         from: handler, croppedToInstancesExtent: false)
+            let ci = CIImage(cvPixelBuffer: masked)
+            guard let outCG = CIContext().createCGImage(ci, from: ci.extent),
+                  let dest = CGImageDestinationCreateWithURL(fileURL as CFURL, "public.png" as CFString, 1, nil) else { return }
+            CGImageDestinationAddImage(dest, outCG, nil)
+            CGImageDestinationFinalize(dest)
+        } catch {
+            // leave the original file as-is
+        }
     }
 }
