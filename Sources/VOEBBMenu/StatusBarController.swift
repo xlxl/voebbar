@@ -9,6 +9,10 @@ final class StatusBarController: NSObject {
     /// running. Blocks a second refresh (timer / menuWillOpen / manual) from starting a parallel
     /// crawl of the same targets — `isLoading` alone drops too early for that.
     private var isEnriching = false
+    /// True from the moment a renewal is triggered (including while its confirmation dialog is up)
+    /// until its result was shown. Blocks a second renewal and any refresh in between — the timer
+    /// or `menuWillOpen` must not log in again or replace the list mid-submit.
+    private var isRenewing = false
 
     private static let maxTitleLength = 40
 
@@ -57,7 +61,7 @@ final class StatusBarController: NSObject {
     // MARK: - Refresh
 
     func refresh() {
-        guard !isLoading, !isEnriching else { return }
+        guard !isLoading, !isEnriching, !isRenewing else { return }
 
         let accounts = AccountStorage.shared.accounts
         guard !accounts.isEmpty else {
@@ -128,8 +132,17 @@ final class StatusBarController: NSObject {
         }
     }
 
+    // MARK: - Renewal
+
     func renewAll(for accountData: AccountData) {
-        performRenewal(for: accountData, title: accountData.account.name) { session, password in
+        performRenewal(
+            for: accountData.account,
+            confirmTitle: "Alle verlängern?",
+            confirmMessage: confirmationMessage(
+                lead: "Für »\(accountData.account.name)« \(loanPhrase(accountData.loans.count)) zur Verlängerung eingereicht.",
+                loans: accountData.loans),
+            resultTitle: accountData.account.name
+        ) { session, password in
             try await session.renewAllLoans(password: password)
         }
     }
@@ -137,35 +150,156 @@ final class StatusBarController: NSObject {
     /// Verlängert für ein Konto nur die demnächst fälligen Bücher (und nur die).
     func renewDueSoon(for accountData: AccountData) {
         let days = AccountStorage.shared.renewalDueDays
-        performRenewal(for: accountData, title: "\(accountData.account.name) – fällige verlängern") { session, password in
+        let due = accountData.loans.filter { $0.daysUntilDue <= days }
+        performRenewal(
+            for: accountData.account,
+            confirmTitle: "Fällige verlängern?",
+            confirmMessage: confirmationMessage(
+                lead: "Für »\(accountData.account.name)« \(loanPhrase(due.count)) mit Fälligkeit in ≤ \(days) Tagen zur Verlängerung eingereicht.",
+                loans: due),
+            resultTitle: "\(accountData.account.name) – fällige verlängern"
+        ) { session, password in
             try await session.renewDueLoans(password: password, withinDays: days)
         }
     }
 
+    /// Renews exactly the given loans (from the overview window's selection), which may span
+    /// several accounts — one session per account, sequentially, results merged into one message.
+    /// Loans are addressed by `Loan.renewalKey`, not by the session-local checkbox value.
+    func renewSelected(_ selection: [(account: LibraryAccount, loan: Loan)], anchor: NSWindow?) {
+        guard !selection.isEmpty else { return }
+
+        let accountOf = Dictionary(selection.map { ($0.loan.renewalKey, $0.account.name) },
+                                  uniquingKeysWith: { first, _ in first })
+        let multipleAccounts = Set(selection.map(\.account.cardNumber)).count > 1
+        let loans = selection.map(\.loan)
+        let message = confirmationMessage(
+            lead: "Es \(loanPhrase(loans.count)) zur Verlängerung eingereicht.",
+            loans: loans,
+            line: multipleAccounts
+                ? { "• \(self.truncate($0.title, to: 40)) – \(accountOf[$0.renewalKey] ?? "") (bis \($0.dueDateString))" }
+                : nil)
+
+        // Gruppiert nach Konto: pro Konto ein Login, alle Schlüssel dieses Kontos in einem Durchlauf.
+        let grouped = Dictionary(grouping: selection, by: { $0.account.cardNumber })
+        guard beginRenewal() else { return }
+
+        Task { @MainActor in
+            guard await Alerts.confirm(
+                title: loans.count == 1 ? "Medium verlängern?" : "\(loans.count) Medien verlängern?",
+                message: message, confirmTitle: "Verlängern", window: anchor)
+            else {
+                self.endRenewal()
+                return
+            }
+            self.updateButtonForLoading()
+
+            var blocks: [String] = []
+            for (_, entries) in grouped.sorted(by: { $0.value[0].account.name < $1.value[0].account.name }) {
+                let account = entries[0].account
+                let keys = Set(entries.map(\.loan.renewalKey))
+                let body: String
+                if let password = AccountStorage.shared.password(for: account) {
+                    do {
+                        body = try await VOEBBSession(account: account)
+                            .renewLoans(password: password, keys: keys).userMessage
+                    } catch {
+                        // Ein defektes Konto darf die anderen nicht abbrechen.
+                        body = "⚠️ \(error.localizedDescription)"
+                    }
+                } else {
+                    body = "⚠️ Kein Passwort gespeichert"
+                }
+                blocks.append(grouped.count > 1 ? "\(account.name):\n\(body)" : body)
+            }
+
+            self.endRenewal()
+            await Alerts.info(title: loans.count == 1 ? "Verlängerung" : "Verlängerung der Auswahl",
+                              message: blocks.joined(separator: "\n\n"), window: anchor)
+            // Erst den Button zurücksetzen: läuft z.B. gerade eine Anreicherung, steigt `refresh()`
+            // sofort wieder aus und die Ladeanzeige würde hängen bleiben.
+            self.updateButton()
+            self.refresh()
+        }
+    }
+
     private func performRenewal(
-        for accountData: AccountData,
-        title: String,
+        for account: LibraryAccount,
+        confirmTitle: String,
+        confirmMessage: String,
+        resultTitle: String,
+        anchor: NSWindow? = nil,
         _ run: @escaping (VOEBBSession, String) async throws -> RenewalOutcome
     ) {
-        guard let password = AccountStorage.shared.password(for: accountData.account) else { return }
+        guard let password = AccountStorage.shared.password(for: account) else {
+            Task { @MainActor in
+                await Alerts.info(title: "Kein Passwort gespeichert",
+                                  message: "Für »\(account.name)« liegt kein Passwort im Schlüsselbund.",
+                                  window: anchor)
+            }
+            return
+        }
+        guard beginRenewal() else { return }
 
-        Task {
-            await MainActor.run { self.updateButtonForLoading() }
-            let session = VOEBBSession(account: accountData.account)
+        Task { @MainActor in
+            guard await Alerts.confirm(title: confirmTitle, message: confirmMessage,
+                                       confirmTitle: "Verlängern", window: anchor)
+            else {
+                self.endRenewal()
+                return
+            }
+            self.updateButtonForLoading()
+            let session = VOEBBSession(account: account)
             do {
                 let outcome = try await run(session, password)
-                await MainActor.run {
-                    self.showAlert(title: title, message: outcome.userMessage)
-                    self.refresh()
-                }
+                self.endRenewal()
+                await Alerts.info(title: resultTitle, message: outcome.userMessage, window: anchor)
+                self.updateButton()   // s. renewSelected: refresh() kann sofort aussteigen
+                self.refresh()
             } catch {
-                await MainActor.run {
-                    self.showAlert(title: "Fehler beim Verlängern", message: error.localizedDescription)
-                    self.isLoading = false
-                    self.updateButton()
-                }
+                self.endRenewal()
+                self.updateButton()
+                await Alerts.info(title: "Fehler beim Verlängern",
+                                  message: error.localizedDescription, window: anchor)
             }
         }
+    }
+
+    /// Claims the renewal slot (see `isRenewing`); false means one is already in flight.
+    private func beginRenewal() -> Bool {
+        guard !isRenewing, !isLoading else { return false }
+        isRenewing = true
+        return true
+    }
+
+    private func endRenewal() { isRenewing = false }
+
+    private static let confirmListLimit = 8
+
+    /// Body of a renewal confirmation: which items would be submitted (capped, one per line) plus
+    /// what the last renewability probe said about them — blocked items are skipped by the
+    /// two-step flow, so the dialog says so instead of letting the result surprise the user.
+    private func confirmationMessage(lead: String, loans: [Loan], line: ((Loan) -> String)? = nil) -> String {
+        var lines = [lead, ""]
+        let format = line ?? { "• \(self.truncate($0.title, to: 48)) (bis \($0.dueDateString))" }
+        lines += loans.prefix(Self.confirmListLimit).map(format)
+        if loans.count > Self.confirmListLimit {
+            lines.append("… und \(loans.count - Self.confirmListLimit) weitere")
+        }
+
+        let blocked = loans.filter { $0.isRenewable == false }.count
+        if blocked > 0 {
+            lines.append("")
+            lines.append(blocked == 1
+                ? "1 davon war bei der letzten Prüfung nicht verlängerbar und wird übersprungen."
+                : "\(blocked) davon waren bei der letzten Prüfung nicht verlängerbar und werden übersprungen.")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// „wird 1 Ausleihe" / „werden 5 Ausleihen" — passendes Verb zur Anzahl.
+    private func loanPhrase(_ count: Int) -> String {
+        count == 1 ? "wird 1 Ausleihe" : "werden \(count) Ausleihen"
     }
 
     // MARK: - Button State
@@ -542,15 +676,6 @@ final class StatusBarController: NSObject {
               let data = currentData.first(where: { $0.account.cardNumber == cardNumber })
         else { return }
         renewDueSoon(for: data)
-    }
-
-    private func showAlert(title: String, message: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
     }
 }
 

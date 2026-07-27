@@ -123,13 +123,29 @@ final class VOEBBSession {
         try await renewLoans(password: password) { $0.daysUntilDue <= days }
     }
 
+    /// Renews exactly the loans identified by `keys` (see `Loan.renewalKey`), and only those.
+    /// The keys come from an earlier refresh, so an item may have been returned meanwhile — that
+    /// case is reported instead of silently renewing nothing.
+    func renewLoans(password: String, keys: Set<String>) async throws -> RenewalOutcome {
+        try await renewLoans(
+            password: password,
+            noMatchMessage: "Nicht mehr in der Ausleihliste – zwischenzeitlich zurückgegeben oder verlängert? Bitte aktualisieren."
+        ) { keys.contains($0.renewalKey) }
+    }
+
     /// Renewal is a two-step flow because BOTH "Alle verlängern" and "Markierte Medien
     /// verlängern" abort the entire batch if a single selected item is blocked (e.g. by a
     /// Vormerkung). So we first probe renewability ("Markierte Medien verlängerbar?",
     /// $Button$2) on the selected candidates, then submit only the confirmed-renewable ones
     /// ("Markierte Medien verlängern", $Button$1). See memory `voebb-renewal-button-mapping`.
-    /// `select` narrows which loans are considered (e.g. only soon-due ones).
-    private func renewLoans(password: String, selecting select: (Loan) -> Bool) async throws -> RenewalOutcome {
+    /// `select` narrows which loans are considered (e.g. only soon-due ones); `noMatchMessage` is
+    /// reported when the selection matches no current loan (relevant for key-based selection,
+    /// where the target may have been returned since the last refresh).
+    private func renewLoans(
+        password: String,
+        noMatchMessage: String? = nil,
+        selecting select: (Loan) -> Bool
+    ) async throws -> RenewalOutcome {
         let (appURL, overviewHTML) = try await login(password: password)
 
         let (loansHTML, loansURL) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZA", rc: 3)
@@ -142,7 +158,7 @@ final class VOEBBSession {
         // Only the selected candidates are probed/renewed — never touch the others.
         let candidateCheckboxes = loans.filter(select).map(\.checkboxValue).filter { !$0.isEmpty }
         guard !candidateCheckboxes.isEmpty else {
-            return RenewalOutcome()
+            return RenewalOutcome(specialMessage: noMatchMessage)
         }
 
         // Step 1: probe "verlängerbar?" ($Button$2) with only the candidates checked.

@@ -5,8 +5,15 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
 
     private var window: NSWindow?
     private var tableView: NSTableView?
-    private var allLoans: [(account: String, loan: Loan)] = []
+    /// The account is kept whole (not just its name): a renewal from here needs the card number to
+    /// look up the password and open a session for exactly that account.
+    private var allLoans: [(account: LibraryAccount, loan: Loan)] = []
     private var sortOrder: NSSortDescriptor?
+    private var renewButton: NSButton?
+
+    private var statusBar: StatusBarController? {
+        (NSApp.delegate as? AppDelegate)?.statusBarController
+    }
 
     // MARK: - Public API
 
@@ -18,13 +25,16 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
     }
 
     func reload(with data: [AccountData]) {
+        let selected = selectedLoanIDs()
         allLoans = data.flatMap { accountData in
-            accountData.loans.map { (account: accountData.account.name, loan: $0) }
+            accountData.loans.map { (account: accountData.account, loan: $0) }
         }
         .sorted { $0.loan.dueDate < $1.loan.dueDate }
 
         tableView?.reloadData()
+        restoreSelection(selected)
         updateSummaryLabel()
+        updateRenewButton()
     }
 
     // MARK: - Build Window
@@ -66,6 +76,13 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         refreshBtn.translatesAutoresizingMaskIntoConstraints = false
         toolbar.addSubview(refreshBtn)
 
+        let renewBtn = NSButton(title: "↺  Auswahl verlängern …", target: self, action: #selector(onRenewSelection))
+        renewBtn.bezelStyle = .rounded
+        renewBtn.isEnabled = false
+        renewBtn.translatesAutoresizingMaskIntoConstraints = false
+        toolbar.addSubview(renewBtn)
+        renewButton = renewBtn
+
         NSLayoutConstraint.activate([
             titleLabel.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 16),
             titleLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor, constant: -8),
@@ -73,6 +90,10 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
             summaryLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor, constant: 8),
             refreshBtn.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -16),
             refreshBtn.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            renewBtn.trailingAnchor.constraint(equalTo: refreshBtn.leadingAnchor, constant: -8),
+            renewBtn.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            // Titel/Zusammenfassung dürfen nicht unter die Knöpfe laufen (kleines Fenster).
+            renewBtn.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12),
             toolbar.heightAnchor.constraint(equalToConstant: 56),
         ])
 
@@ -89,7 +110,15 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         table.gridStyleMask = .solidHorizontalGridLineMask
         table.rowHeight = 22
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        table.allowsMultipleSelection = false
+        table.allowsMultipleSelection = true
+
+        // Rechtsklick → „Verlängern …". Titel/Zustand werden in `menuNeedsUpdate` gesetzt.
+        let rowMenu = NSMenu()
+        rowMenu.delegate = self
+        rowMenu.autoenablesItems = false   // sonst überschreibt AppKit das isEnabled aus menuNeedsUpdate
+        rowMenu.addItem(NSMenuItem(title: "Verlängern …", action: #selector(onRenewSelection), keyEquivalent: ""))
+        rowMenu.items.forEach { $0.target = self }
+        table.menu = rowMenu
 
         let cols: [(id: String, title: String, width: CGFloat, minWidth: CGFloat)] = [
             ("emoji",   "",              30,  30),
@@ -157,11 +186,53 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         label.stringValue = parts.joined(separator: "  ·  ")
     }
 
+    // MARK: - Selection
+
+    /// Rows a row action applies to: the right-clicked row, unless it is part of the current
+    /// multi-row selection (then the whole selection) — Finder's behaviour. Without a click
+    /// (toolbar button) it is simply the selection.
+    private func targetRows() -> [Int] {
+        guard let table = tableView else { return [] }
+        let selected = table.selectedRowIndexes
+        let clicked = table.clickedRow
+        if clicked >= 0, !selected.contains(clicked) { return [clicked] }
+        return selected.sorted()
+    }
+
+    private func updateRenewButton() {
+        renewButton?.isEnabled = !(tableView?.selectedRowIndexes.isEmpty ?? true)
+    }
+
+    /// Identity of a row for selection purposes: account + loan, because `reloadData()` keeps row
+    /// *indexes*. Without remapping, sorting by a column header or a refresh would silently move
+    /// the selection onto different media — and then renew those.
+    private func rowID(_ item: (account: LibraryAccount, loan: Loan)) -> String {
+        "\(item.account.cardNumber)|\(item.loan.renewalKey)"
+    }
+
+    private func selectedLoanIDs() -> Set<String> {
+        guard let table = tableView else { return [] }
+        return Set(table.selectedRowIndexes.filter { $0 < allLoans.count }.map { rowID(allLoans[$0]) })
+    }
+
+    private func restoreSelection(_ ids: Set<String>) {
+        guard let table = tableView, !ids.isEmpty else { return }
+        table.selectRowIndexes(IndexSet(allLoans.indices.filter { ids.contains(rowID(allLoans[$0])) }),
+                               byExtendingSelection: false)
+    }
+
     // MARK: - Actions
 
     @objc private func onRefresh() {
-        // Delegate to StatusBarController
-        NSApp.delegate.flatMap { $0 as? AppDelegate }?.statusBarController?.refresh()
+        statusBar?.refresh()
+    }
+
+    /// Verlängert die markierten (bzw. rechtsgeklickte) Medien — die Bestätigung und der
+    /// Netzwerkteil liegen im StatusBarController, damit Menü- und Fenster-Weg identisch laufen.
+    @objc private func onRenewSelection() {
+        let rows = targetRows().filter { $0 < allLoans.count }
+        guard !rows.isEmpty else { return }
+        statusBar?.renewSelected(rows.map { allLoans[$0] }, anchor: window)
     }
 
     func windowWillClose(_ notification: Notification) {}
@@ -185,6 +256,7 @@ extension OverviewWindowController: NSTableViewDataSource {
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         guard let desc = tableView.sortDescriptors.first else { return }
+        let selected = selectedLoanIDs()
         allLoans.sort {
             switch desc.key {
             case "title":
@@ -198,12 +270,17 @@ extension OverviewWindowController: NSTableViewDataSource {
             }
         }
         tableView.reloadData()
+        restoreSelection(selected)
     }
 }
 
 // MARK: - NSTableViewDelegate
 
 extension OverviewWindowController: NSTableViewDelegate {
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateRenewButton()
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row < allLoans.count else { return nil }
         let item = allLoans[row]
@@ -225,7 +302,7 @@ extension OverviewWindowController: NSTableViewDelegate {
             cell.toolTip = "\(loan.title)\n\(LibraryName.short(loan.library))"
 
         case "account":
-            cell.stringValue = item.account
+            cell.stringValue = item.account.name
 
         case "due":
             cell.stringValue = loan.dueDateString
@@ -267,5 +344,16 @@ extension OverviewWindowController: NSTableViewDelegate {
         }
 
         return cell
+    }
+}
+
+// MARK: - NSMenuDelegate (row context menu)
+
+extension OverviewWindowController: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let item = menu.items.first else { return }
+        let count = targetRows().filter { $0 < allLoans.count }.count
+        item.title = count > 1 ? "\(count) Medien verlängern …" : "Verlängern …"
+        item.isEnabled = count > 0
     }
 }

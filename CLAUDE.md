@@ -42,6 +42,10 @@ This is the core and most fragile part of the app. VÖBB's site (`aDISWeb`, an A
 ### Renewal flow
 Both VÖBB renewal buttons ("Alle verlängern" and "Markierte Medien verlängern") abort the **entire batch** if any selected loan is blocked (e.g. by a hold/"Vormerkung"). `renewAllLoans()` therefore runs a two-step flow: first probe renewability via "Markierte Medien verlängerbar?" (`$Button$2`, read-only), then submit only the confirmed-renewable checkboxes via "Markierte Medien verlängern" (`$Button$1`). Button-field ↔ action mapping was reverse-engineered from live HTML; buttons are position-numbered (`$Button$0` = Alle verlängern). The result is a `RenewalOutcome` (renewed + blocked incl. per-item reason).
 
+Which loans take part is a predicate on the **freshly parsed** list inside `renewLoans(password:noMatchMessage:selecting:)` — `renewAllLoans` / `renewDueLoans(withinDays:)` / `renewLoans(password:keys:)` (targeted, from the overview window's selection) are all thin wrappers around it. Targeted renewal addresses loans by `Loan.renewalKey` (the barcode, else title+due date), **never** by `checkboxValue`: that value is only valid inside the aDIS session that produced it, and a renewal logs in again.
+
+Every renewal path goes through `Alerts.confirm` first (`Alerts.swift`; sheet when a window is passed, free modal for the status menu) and lists what is about to be submitted — a misclick in the status menu used to renew everything immediately. `StatusBarController.isRenewing` is held from the moment a renewal is triggered (dialog included) until its result is shown, and it blocks `refresh()`, so timer/`menuWillOpen` can't log in again mid-submit.
+
 ### Storage
 - `AccountStorage` (UserDefaults key `voebb_accounts_v1`) — account metadata (name + card number), the refresh interval (`voebb_refresh_interval_hours`, constrained to `AccountStorage.availableRefreshIntervalsHours`), and the "due soon" threshold in days for the per-account "Fällige verlängern" action (`voebb_renewal_due_days`, constrained to `availableRenewalDueDays`).
 - `KeychainHelper` — passwords, keyed by card number, Keychain service `de.voebb.menubar`. Passwords never touch UserDefaults.
@@ -90,7 +94,7 @@ All windows are built by hand with explicit `NSRect` frames (no `.xib`/storyboar
 
 - `StatusBarController` — the `NSStatusItem` and its dropdown menu (per-account submenus, refresh/renew actions, auto-refresh timer).
 - `PreferencesWindowController` (singleton) — account add/remove, plus two symmetric settings rows of custom pill-style `NSButton`s (built by hand via `makePillRow`/`stylePills`, not `NSSegmentedControl`): refresh interval and renewal "due soon" threshold.
-- `OverviewWindowController` (singleton) — sortable table of all loans across all accounts.
+- `OverviewWindowController` (singleton) — sortable table of all loans across all accounts, with multi-row selection that can be renewed (row context menu + toolbar button, both routed through `StatusBarController.renewSelected` so menu and window share one confirm/network path). Rows keep the whole `LibraryAccount` (a selection must map back to card number + password), and every `reloadData()` remaps the selection by account+`renewalKey` — row *indexes* survive a re-sort, so without that the selection would silently point at other media.
 
 ### Data flow
 `StatusBarController.refresh()` reads accounts from `AccountStorage`, creates one `VOEBBSession` per account (fresh `URLSessionConfiguration.ephemeral`, no cookie persistence across sessions), fetches `AccountData` for each, then updates the status bar menu and pushes results into `OverviewWindowController`.

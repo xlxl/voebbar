@@ -37,6 +37,11 @@ struct Loan {
     /// Coarse, heuristic media category derived from the type tag / signature.
     var mediaType: String = "Buch"
 
+    /// Identity of a loan across sessions: the barcode when VÖBB printed one, else title+due date.
+    /// `checkboxValue` cannot serve here — it is only valid inside the aDIS session that produced
+    /// it, and a targeted renewal logs in again and re-parses the list.
+    var renewalKey: String { mediaNumber.isEmpty ? "\(title)|\(dueDateString)" : mediaNumber }
+
     /// Result of the "Markierte Medien verlängerbar?" probe, merged in during refresh.
     /// nil = probe didn't run or the row couldn't be matched.
     var isRenewable: Bool? = nil
