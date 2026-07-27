@@ -92,4 +92,50 @@ else
 fi
 
 echo "App bundle created at: $APP_DIR"
-echo "Launch with: open $APP_DIR"
+
+# Deploy to ONE fixed location and run from there. The Keychain's ACL for the stored passwords is
+# tied to the trusted application's *launch path* as well as its signature: a stable identity keeps
+# rebuilds silent, but a bundle started from a different path counts as a different app and
+# re-prompts. So the repo copy is never launched — it is moved to $DEPLOY_DIR, which is the only
+# path that ever gets "Immer erlauben". `DEPLOY=0 ./build_app.sh` builds without deploying.
+DEPLOY="${DEPLOY:-1}"
+DEPLOY_DIR="${DEPLOY_DIR:-/Applications}"
+DEPLOY_APP="$DEPLOY_DIR/$APP_DIR"
+
+if [ "$DEPLOY" = "0" ]; then
+    echo "DEPLOY=0 — not deploying. Note: launching '$APP_DIR' from here triggers a Keychain prompt"
+    echo "(different launch path than $DEPLOY_APP)."
+    echo "Launch with: open $APP_DIR"
+    exit 0
+fi
+
+# Quit the running instance (any path) before replacing the bundle, so we don't end up with two
+# status items or a half-swapped bundle.
+if pgrep -x "$APP_NAME" > /dev/null; then
+    echo "Quitting running $APP_NAME …"
+    pkill -x "$APP_NAME" || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pgrep -x "$APP_NAME" > /dev/null || break
+        sleep 0.3
+    done
+    pgrep -x "$APP_NAME" > /dev/null && echo "Warning: $APP_NAME is still running."
+fi
+
+echo "Deploying to $DEPLOY_APP …"
+rm -rf "$DEPLOY_APP"
+cp -R "$APP_DIR" "$DEPLOY_APP"
+
+# Verify the deployed copy really carries the stable identity — an ad-hoc bundle here would
+# re-prompt on every rebuild, which is the whole thing this deploy step exists to prevent.
+if codesign --verify --strict "$DEPLOY_APP" 2>/dev/null; then
+    echo "Signature OK: $(codesign -dv "$DEPLOY_APP" 2>&1 | grep '^Authority=' | head -1)"
+else
+    echo "Warning: signature check failed for $DEPLOY_APP (ad-hoc? expect Keychain prompts)."
+fi
+
+# Remove the repo copy so there is exactly one launchable bundle — `open VOEBBMenu.app` out of the
+# repo is what re-triggers the Keychain prompt.
+rm -rf "$APP_DIR"
+
+open "$DEPLOY_APP"
+echo "Launched: $DEPLOY_APP"

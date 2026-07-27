@@ -16,11 +16,13 @@ swift build -c release      # release build
 To produce a runnable `.app` bundle:
 
 ```
-./build_app.sh
-open VOEBBMenu.app
+./build_app.sh              # build + sign + deploy to /Applications + launch
+DEPLOY=0 ./build_app.sh     # build only, leave VOEBBMenu.app in the repo
 ```
 
-`build_app.sh` builds the release binary, assembles `VOEBBMenu.app/Contents/{MacOS,Resources}`, and writes `Info.plist` (bundle id `de.voebb.menubar`, `LSUIElement=true`, min macOS 13). It also tries to copy an icon from a hardcoded path (`/Users/nicolasoestreich/Desktop/icon.icns`) — silently skipped if that path doesn't exist on the current machine.
+`build_app.sh` builds the release binary, assembles `VOEBBMenu.app/Contents/{MacOS,Resources}`, writes `Info.plist` (bundle id `de.voebb.menubar`, `LSUIElement=true`, min macOS 13), and bundles an icon from `AppIcon.icns` (override with `ICON_SRC=…`, silently skipped when absent).
+
+It then signs with the self-signed identity **`VOEBBMenu Dev`** (override via `SIGN_IDENTITY`; falls back to ad-hoc with a warning) and — unless `DEPLOY=0` — quits the running instance, moves the bundle to `/Applications/VOEBBMenu.app` (`DEPLOY_DIR`), verifies the signature there, **deletes the repo copy**, and launches the deployed app. Both halves matter for the Keychain: the stored VÖBB passwords / Tonies token live in the legacy (ACL-based) Keychain, whose grant is bound to the trusted app's signature **and launch path**. A stable identity keeps rebuilds silent only as long as the app always starts from the same path — launching the repo-local bundle counts as a different app and re-prompts, which is why the repo copy is removed. Detecting the identity uses `security find-identity -p codesigning` *without* `-v`: a self-signed cert is `CSSMERR_TP_NOT_TRUSTED` and would be filtered out by `-v`.
 
 `swift test` currently fails with "no tests found" — `Tests/VOEBBMenuTests` exists (Swift Testing framework, one empty stub) but `Package.swift` only declares the executable target, no test target. If you add real tests, wire up a `testTarget` in `Package.swift` first.
 

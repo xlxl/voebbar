@@ -13,12 +13,17 @@ Gebühren mehrerer Bibliothekskarten und verlängert auf Wunsch.
 
 ```sh
 swift build              # Debug
-./build_app.sh           # erzeugt VOEBBMenu.app (signiert mit „VOEBBMenu Dev", falls vorhanden)
-open VOEBBMenu.app
+./build_app.sh           # baut, signiert, deployt nach /Applications und startet von dort
+DEPLOY=0 ./build_app.sh  # nur bauen, nicht deployen
 ```
 
 Läuft als Accessory-App (`LSUIElement`, kein Dock-Icon). Passwörter liegen im macOS-Schlüsselbund,
 nie in UserDefaults.
+
+`build_app.sh` startet die App bewusst immer vom **selben** Pfad (`/Applications/VOEBBMenu.app`,
+via `DEPLOY_DIR` änderbar) und löscht die Kopie im Repo: Die Schlüsselbund-Freigabe („Immer
+erlauben") hängt nicht nur an der Signatur (`VOEBBMenu Dev`), sondern auch am Startpfad — ein aus
+dem Repo gestartetes Bundle gilt als andere App und fragt erneut nach den gespeicherten Passwörtern.
 
 ## Funktionen
 
