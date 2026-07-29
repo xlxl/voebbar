@@ -93,7 +93,9 @@ final class ArchiveStore {
             published       TEXT NOT NULL DEFAULT '',   -- "Verlag, [Jahr]" (Fundus derives the year)
             series          TEXT NOT NULL DEFAULT '',
             interessenkreis TEXT NOT NULL DEFAULT '',   -- e.g. age recommendation
-            detail_version  INTEGER NOT NULL DEFAULT 0  -- bumped when the Vollanzeige fields are captured
+            detail_version  INTEGER NOT NULL DEFAULT 0,  -- bumped when the Vollanzeige fields are captured
+            record_id       TEXT NOT NULL DEFAULT '',    -- aDIS record key (AK…); Fundus builds the Vollanzeige permalink from it
+            cover_attempts  INTEGER NOT NULL DEFAULT 0   -- failed VLB cover-heal tries; caps the retry loop
         );
         """)
         // Lightweight upgrade for DBs created before these columns existed. ALTER errors
@@ -102,7 +104,9 @@ final class ArchiveStore {
                     "published TEXT NOT NULL DEFAULT ''",
                     "series TEXT NOT NULL DEFAULT ''",
                     "interessenkreis TEXT NOT NULL DEFAULT ''",
-                    "detail_version INTEGER NOT NULL DEFAULT 0"] {
+                    "detail_version INTEGER NOT NULL DEFAULT 0",
+                    "record_id TEXT NOT NULL DEFAULT ''",
+                    "cover_attempts INTEGER NOT NULL DEFAULT 0"] {
             exec("ALTER TABLE media_details ADD COLUMN \(col);")
         }
         // Manual ISBN corrections. The archive app WRITES these; voebbar reads them and
@@ -114,7 +118,7 @@ final class ArchiveStore {
             created_at   TEXT NOT NULL DEFAULT ''
         );
         """)
-        exec("PRAGMA user_version=3;")
+        exec("PRAGMA user_version=4;")
     }
 
     // MARK: - Per-account write
@@ -332,7 +336,8 @@ final class ArchiveStore {
     }
 
     func upsertMediaDetails(mediaNumber: String, isbn: String, coverPath: String,
-                            detail: HTMLParser.CatalogDetail, source: String, status: String) {
+                            detail: HTMLParser.CatalogDetail, source: String, status: String,
+                            recordID: String) {
         queue.sync {
             guard db != nil else { return }
             var stmt: OpaquePointer?
@@ -340,20 +345,21 @@ final class ArchiveStore {
             let sql = """
             INSERT INTO media_details
                 (media_number, isbn, cover_path, blurb, subjects, systematik, source, status, fetched_at,
-                 author, published, series, interessenkreis, detail_version)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,3)
+                 author, published, series, interessenkreis, detail_version, record_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,4,?)
             ON CONFLICT(media_number) DO UPDATE SET isbn=excluded.isbn, cover_path=excluded.cover_path,
                 blurb=excluded.blurb, subjects=excluded.subjects, systematik=excluded.systematik,
                 source=excluded.source, status=excluded.status, fetched_at=excluded.fetched_at,
                 author=excluded.author, published=excluded.published, series=excluded.series,
-                interessenkreis=excluded.interessenkreis, detail_version=excluded.detail_version;
+                interessenkreis=excluded.interessenkreis, detail_version=excluded.detail_version,
+                record_id=excluded.record_id;
             """
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
             bind(stmt, 1, mediaNumber); bind(stmt, 2, isbn); bind(stmt, 3, coverPath); bind(stmt, 4, detail.blurb)
             bind(stmt, 5, detail.subjects); bind(stmt, 6, detail.systematik); bind(stmt, 7, source); bind(stmt, 8, status)
             bind(stmt, 9, Self.iso8601(Date()))
             bind(stmt, 10, detail.author); bind(stmt, 11, detail.published); bind(stmt, 12, detail.series)
-            bind(stmt, 13, detail.interessenkreis)
+            bind(stmt, 13, detail.interessenkreis); bind(stmt, 14, recordID)
             sqlite3_step(stmt)
         }
     }
@@ -362,8 +368,8 @@ final class ArchiveStore {
     /// current parser. Re-fetched by ISBN (unambiguous); the cover/source/status stay put.
     /// `detail_version` marks the parser generation: 1 = author/year/… columns, 2 = the
     /// "Zusammenfassung" blurb fallback, 3 = multi-value author/Veröffentlichung (co-authors with a
-    /// separator, year from a second Veröffentlichung row). Gen 3 re-reads every found book once,
-    /// since it can improve author/year broadly.
+    /// separator, year from a second Veröffentlichung row), 4 = the `record_id` (Vollanzeige
+    /// permalink key). Gen 4 re-reads every found book once so existing rows gain their record_id.
     struct DetailTarget { let mediaNumber: String; let isbn: String }
 
     func mediaNeedingDetailBackfill() -> [DetailTarget] {
@@ -374,7 +380,7 @@ final class ArchiveStore {
             defer { sqlite3_finalize(stmt) }
             let sql = """
             SELECT media_number, isbn FROM media_details
-            WHERE detail_version < 3 AND status = 'found' AND isbn <> '' AND source <> 'tonie';
+            WHERE detail_version < 4 AND status = 'found' AND isbn <> '' AND source <> 'tonie';
             """
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -384,21 +390,111 @@ final class ArchiveStore {
         }
     }
 
-    /// Backfill: refresh only the Vollanzeige text fields (cover/source/status/isbn untouched)
-    /// and mark the row as up to date.
-    func updateDetailFields(mediaNumber: String, detail: HTMLParser.CatalogDetail) {
+    /// Backfill: refresh only the Vollanzeige text fields plus the `record_id` (cover/source/status/
+    /// isbn untouched) and mark the row as up to date.
+    func updateDetailFields(mediaNumber: String, detail: HTMLParser.CatalogDetail, recordID: String) {
         queue.sync {
             guard db != nil else { return }
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
             let sql = """
             UPDATE media_details SET blurb=?, subjects=?, systematik=?, author=?, published=?,
-                series=?, interessenkreis=?, detail_version=3 WHERE media_number=?;
+                series=?, interessenkreis=?, record_id=?, detail_version=4 WHERE media_number=?;
             """
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
             bind(stmt, 1, detail.blurb); bind(stmt, 2, detail.subjects); bind(stmt, 3, detail.systematik)
             bind(stmt, 4, detail.author); bind(stmt, 5, detail.published); bind(stmt, 6, detail.series)
-            bind(stmt, 7, detail.interessenkreis); bind(stmt, 8, mediaNumber)
+            bind(stmt, 7, detail.interessenkreis); bind(stmt, 8, recordID); bind(stmt, 9, mediaNumber)
+            sqlite3_step(stmt)
+        }
+    }
+
+    // MARK: - Cover self-heal
+
+    /// Found catalog books that carry a real ISBN but never got a cover file (a transient download
+    /// miss at enrichment time, then frozen as 'found' so nothing retries them). Restricted to
+    /// ISBN-shaped keys (`97…`) so Tonie EAN box codes stay with the Tonie image pass, and capped
+    /// via `cover_attempts` so a genuinely cover-less book (VÖBB 404) isn't retried forever.
+    func coversNeedingHeal() -> [DetailTarget] {
+        return queue.sync {
+            guard db != nil else { return [] }
+            var out: [DetailTarget] = []
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            SELECT media_number, isbn FROM media_details
+            WHERE status = 'found' AND cover_path = '' AND isbn LIKE '97%'
+              AND source IN ('title','isbn','manual') AND cover_attempts < 3;
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(DetailTarget(mediaNumber: col(stmt, 0), isbn: col(stmt, 1)))
+            }
+            return out
+        }
+    }
+
+    func setCoverPath(mediaNumber: String, coverPath: String) {
+        queue.sync {
+            guard db != nil else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, "UPDATE media_details SET cover_path=? WHERE media_number=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+            bind(stmt, 1, coverPath); bind(stmt, 2, mediaNumber)
+            sqlite3_step(stmt)
+        }
+    }
+
+    func bumpCoverAttempt(mediaNumber: String) {
+        queue.sync {
+            guard db != nil else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, "UPDATE media_details SET cover_attempts = cover_attempts + 1 WHERE media_number=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+            bind(stmt, 1, mediaNumber)
+            sqlite3_step(stmt)
+        }
+    }
+
+    // MARK: - Manual rescrape (Fundus-triggered)
+
+    struct RescrapeTarget { let mediaNumber: String; let title: String; let overrideISBN: String }
+
+    /// Items Fundus has flagged for a fresh catalog crawl (`fundus_rescrape`). Self-resolving: a row
+    /// is a target only while its `requested_at` is newer than the last enrichment (`fetched_at`), so
+    /// once we re-crawl it stops firing — voebbar never has to write back into the Fundus table. The
+    /// table is Fundus-owned, so we only read it when it exists (like `toniesNeedingImage`).
+    func mediaNeedingRescrape() -> [RescrapeTarget] {
+        return queue.sync {
+            guard db != nil, tableExists("fundus_rescrape") else { return [] }
+            var out: [RescrapeTarget] = []
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            SELECT r.media_number, b.title, COALESCE(o.isbn, '')
+            FROM fundus_rescrape r
+            JOIN (SELECT media_number, title, MAX(last_seen) FROM borrow_events GROUP BY media_number) b
+                 ON b.media_number = r.media_number
+            LEFT JOIN media_details d       ON d.media_number = r.media_number
+            LEFT JOIN media_isbn_override o ON o.media_number = r.media_number
+            WHERE d.media_number IS NULL OR d.fetched_at = '' OR d.fetched_at < r.requested_at;
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(RescrapeTarget(mediaNumber: col(stmt, 0), title: col(stmt, 1), overrideISBN: col(stmt, 2)))
+            }
+            return out
+        }
+    }
+
+    /// Clears the cover-heal attempt cap for an item so a manual rescrape gets fresh tries.
+    func resetCoverAttempts(mediaNumber: String) {
+        queue.sync {
+            guard db != nil else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, "UPDATE media_details SET cover_attempts = 0 WHERE media_number=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+            bind(stmt, 1, mediaNumber)
             sqlite3_step(stmt)
         }
     }

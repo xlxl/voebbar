@@ -23,20 +23,43 @@ final class CatalogEnricher {
     /// every not-yet-processed item by title. Safe to call after each refresh — it no-ops when
     /// there is nothing new.
     func enrichMissing() async {
+        // Fundus-triggered manual rescrapes run first and re-crawl regardless of current state; the
+        // other passes skip whatever a rescrape already covers this run.
+        let rescrapes = ArchiveStore.shared.mediaNeedingRescrape()
+        let rescrapeNumbers = Set(rescrapes.map(\.mediaNumber))
         let overrides = ArchiveStore.shared.pendingISBNOverrides()
-        let overrideNumbers = Set(overrides.map(\.mediaNumber))
+            .filter { !rescrapeNumbers.contains($0.mediaNumber) }
+        let skip = Set(overrides.map(\.mediaNumber)).union(rescrapeNumbers)
         let targets = ArchiveStore.shared.mediaNeedingEnrichment()
-            .filter { !overrideNumbers.contains($0.mediaNumber) }
+            .filter { !skip.contains($0.mediaNumber) }
         // Books enriched before the author/year/… columns existed: fill them once, by ISBN.
         let backfill = ArchiveStore.shared.mediaNeedingDetailBackfill()
-            .filter { !overrideNumbers.contains($0.mediaNumber) }
+            .filter { !skip.contains($0.mediaNumber) }
+        // Found books that carry a real ISBN but never got a cover file → retry the plain VLB GET.
+        let healTargets = ArchiveStore.shared.coversNeedingHeal()
+            .filter { !skip.contains($0.mediaNumber) }
 
-        guard !overrides.isEmpty || !targets.isEmpty || !backfill.isEmpty else { return }
+        guard !rescrapes.isEmpty || !overrides.isEmpty || !targets.isEmpty
+            || !backfill.isEmpty || !healTargets.isEmpty else { return }
 
         try? FileManager.default.createDirectory(at: ArchiveStore.coversDirectory, withIntermediateDirectories: true)
 
-        EnrichmentProgress.shared.start(phase: "Titel", total: overrides.count + targets.count + backfill.count)
+        EnrichmentProgress.shared.start(
+            phase: "Titel",
+            total: rescrapes.count + overrides.count + targets.count + backfill.count + healTargets.count)
 
+        for r in rescrapes {
+            ArchiveStore.shared.resetCoverAttempts(mediaNumber: r.mediaNumber)
+            // Reproduce the original enrichment decision: a manual ISBN override → search by ISBN,
+            // otherwise by title (which — per the user's observation — actually surfaces the cover).
+            if !r.overrideISBN.isEmpty {
+                await enrichOne(mediaNumber: r.mediaNumber, term: r.overrideISBN, source: "manual")
+            } else {
+                await enrichOne(mediaNumber: r.mediaNumber, term: r.title, source: "title")
+            }
+            EnrichmentProgress.shared.step()
+            try? await Task.sleep(nanoseconds: politeDelay)
+        }
         for o in overrides {
             await enrichOne(mediaNumber: o.mediaNumber, term: o.isbn, source: "manual")
             EnrichmentProgress.shared.step()
@@ -49,6 +72,26 @@ final class CatalogEnricher {
         }
         for b in backfill {
             await backfillOne(mediaNumber: b.mediaNumber, isbn: b.isbn)
+            EnrichmentProgress.shared.step()
+            try? await Task.sleep(nanoseconds: politeDelay)
+        }
+        await healMissingCovers(healTargets)
+    }
+
+    /// Cover self-heal: for each found book with a real ISBN but no cached cover, re-fetch the VLB
+    /// cover directly (its URL is deterministic from the ISBN — no aDIS search/login needed). A
+    /// success records the path; a miss bumps `cover_attempts` so the query drops the item after a
+    /// few tries and a genuinely cover-less record isn't hammered every refresh.
+    private func healMissingCovers(_ targets: [ArchiveStore.DetailTarget]) async {
+        guard !targets.isEmpty else { return }
+        let session = makeSession()
+        for t in targets {
+            let url = "\(base)/vlb/cover/\(t.isbn)/m"
+            if let path = await downloadCover(url, mediaNumber: t.mediaNumber, session: session) {
+                ArchiveStore.shared.setCoverPath(mediaNumber: t.mediaNumber, coverPath: path)
+            } else {
+                ArchiveStore.shared.bumpCoverAttempt(mediaNumber: t.mediaNumber)
+            }
             EnrichmentProgress.shared.step()
             try? await Task.sleep(nanoseconds: politeDelay)
         }
@@ -72,7 +115,7 @@ final class CatalogEnricher {
             // re-crawling the same dead ISBN on every refresh.
             ArchiveStore.shared.upsertMediaDetails(
                 mediaNumber: mediaNumber, isbn: source == "manual" ? cleanTerm : "", coverPath: "",
-                detail: .empty, source: source, status: "notfound")
+                detail: .empty, source: source, status: "notfound", recordID: "")
             return
         }
 
@@ -86,7 +129,7 @@ final class CatalogEnricher {
         let coverPath = await downloadCover(hit.coverURL, mediaNumber: mediaNumber, session: ctx.session) ?? ""
         ArchiveStore.shared.upsertMediaDetails(
             mediaNumber: mediaNumber, isbn: hit.isbn, coverPath: coverPath,
-            detail: detail, source: source, status: "found")
+            detail: detail, source: source, status: "found", recordID: hit.recordID)
     }
 
     /// Re-opens the Vollanzeige of an already-enriched book (by its unambiguous ISBN) to fill the
@@ -98,7 +141,7 @@ final class CatalogEnricher {
               let vollHTML = try? await openVollanzeige(recordID: hit.recordID, term: isbn, trefferliste: resultHTML, ctx: ctx) else {
             return // transient failure → left for a later run (detail_version stays < 1)
         }
-        ArchiveStore.shared.updateDetailFields(mediaNumber: mediaNumber, detail: HTMLParser.parseVollanzeige(vollHTML))
+        ArchiveStore.shared.updateDetailFields(mediaNumber: mediaNumber, detail: HTMLParser.parseVollanzeige(vollHTML), recordID: hit.recordID)
     }
 
     /// Opens the full record from a Trefferliste (re-POST the page's hidden inputs plus the
