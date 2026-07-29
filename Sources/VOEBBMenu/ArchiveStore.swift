@@ -378,9 +378,13 @@ final class ArchiveStore {
             var out: [DetailTarget] = []
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
+            // Tonies take part too: `updateDetailFields` touches neither cover_path nor source, so
+            // their my.tonies image survives, and their `isbn` holds the EAN box code — which the
+            // catalog search resolves just like an ISBN. Without them they'd never get a record_id
+            // and thus no catalog link.
             let sql = """
             SELECT media_number, isbn FROM media_details
-            WHERE detail_version < 4 AND status = 'found' AND isbn <> '' AND source <> 'tonie';
+            WHERE detail_version < 4 AND status = 'found' AND isbn <> '';
             """
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -405,6 +409,20 @@ final class ArchiveStore {
             bind(stmt, 1, detail.blurb); bind(stmt, 2, detail.subjects); bind(stmt, 3, detail.systematik)
             bind(stmt, 4, detail.author); bind(stmt, 5, detail.published); bind(stmt, 6, detail.series)
             bind(stmt, 7, detail.interessenkreis); bind(stmt, 8, recordID); bind(stmt, 9, mediaNumber)
+            sqlite3_step(stmt)
+        }
+    }
+
+    /// Marks a row as backfilled without changing any field. For a search that succeeded but found
+    /// nothing: the row has no Vollanzeige to read, and leaving `detail_version` behind would
+    /// re-crawl it on every single refresh.
+    func markDetailBackfilled(mediaNumber: String) {
+        queue.sync {
+            guard db != nil else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, "UPDATE media_details SET detail_version=4 WHERE media_number=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+            bind(stmt, 1, mediaNumber)
             sqlite3_step(stmt)
         }
     }

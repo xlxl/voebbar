@@ -132,14 +132,21 @@ final class CatalogEnricher {
             detail: detail, source: source, status: "found", recordID: hit.recordID)
     }
 
-    /// Re-opens the Vollanzeige of an already-enriched book (by its unambiguous ISBN) to fill the
-    /// newer fields (author/year/…). Updates text fields only — the cover isn't re-downloaded.
+    /// Re-opens the Vollanzeige of an already-enriched item (by its unambiguous ISBN — for a Tonie,
+    /// the EAN box code, which the catalog resolves the same way) to fill the newer fields
+    /// (author/year/record_id). Updates text fields only — the cover isn't re-downloaded, so a
+    /// Tonie's my.tonies image stays put.
     private func backfillOne(mediaNumber: String, isbn: String) async {
+        // A network/session failure must be retried later; a search that simply has no record must
+        // NOT be — otherwise the row keeps its old detail_version and is re-crawled every refresh.
         guard let ctx = try? await bootstrap(),
-              let resultHTML = try? await search(term: isbn, ctx: ctx),
-              let hit = HTMLParser.parseCatalogResult(resultHTML), !hit.recordID.isEmpty,
+              let resultHTML = try? await search(term: isbn, ctx: ctx) else {
+            return // transient failure → left for a later run
+        }
+        guard let hit = HTMLParser.parseCatalogResult(resultHTML), !hit.recordID.isEmpty,
               let vollHTML = try? await openVollanzeige(recordID: hit.recordID, term: isbn, trefferliste: resultHTML, ctx: ctx) else {
-            return // transient failure → left for a later run (detail_version stays < 1)
+            ArchiveStore.shared.markDetailBackfilled(mediaNumber: mediaNumber)
+            return
         }
         ArchiveStore.shared.updateDetailFields(mediaNumber: mediaNumber, detail: HTMLParser.parseVollanzeige(vollHTML), recordID: hit.recordID)
     }

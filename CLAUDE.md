@@ -64,16 +64,33 @@ entire contract.
   reconciles returns (open rows of a **successfully fetched** account no longer seen → `is_open=0`;
   an account with a fetch *error* is skipped entirely, never mass-closed). voebbar owns and writes
   `borrow_events` and `media_details`; Fundus reads them and adds its own `fundus_*` tables to the
-  same DB. The only thing voebbar reads back from Fundus is **`media_isbn_override`** — it does not
-  read any `fundus_*` table.
+  same DB. What voebbar reads back from Fundus is **`media_isbn_override`** plus exactly two
+  Fundus-owned tables — **`fundus_media_types`** (Tonie-image gate, below) and **`fundus_rescrape`**
+  (manual re-crawl, below). Both are read through `tableExists` guards and never written.
 - **Enrichment runs after each refresh**, orchestrated in `StatusBarController.refresh()`:
   first `CatalogEnricher.enrichMissing()`, then `ToniesEnricher.enrichMissing()`.
   - **`CatalogEnricher`** — anonymous scrape of VÖBB's **public catalog** (`www.voebb.de/aDISWeb`,
-    same fragile aDIS form/session mechanics as `VOEBBService`). Strictly **incremental**: only items
-    with no `media_details` row yet. Three passes: pending `media_isbn_override`s (search by ISBN,
-    lock `source='manual'`), then new items (search by **title**, `source='title'`), then a one-time
-    Vollanzeige backfill for older `detail_version`s. A successful-but-empty search records
-    `status='notfound'` so it is never re-crawled; a network error leaves the item for a later run.
+    same fragile aDIS form/session mechanics as `VOEBBService`). Normally **incremental**: only items
+    with no `media_details` row yet. Five passes, in order: Fundus `fundus_rescrape` requests, then
+    pending `media_isbn_override`s (search by ISBN, lock `source='manual'`), then new items (search by
+    **title**, `source='title'`), then the Vollanzeige backfill for older `detail_version`s, then the
+    cover self-heal. Later passes skip whatever an earlier one already covered this run. A
+    successful-but-empty search records `status='notfound'` so it is never re-crawled; a network error
+    leaves the item for a later run.
+  - **Cover self-heal** — a transient download miss used to freeze a row as `status='found'` with an
+    empty `cover_path`, and nothing retried it (`mediaNeedingEnrichment` only picks rows that don't
+    exist). `coversNeedingHeal()` re-fetches the VLB cover directly — the URL is deterministic from
+    the ISBN, so no aDIS search or login is needed. Limited to ISBN-shaped keys (`isbn LIKE '97%'`)
+    so Tonie EAN box codes stay with `ToniesEnricher`, and capped by `cover_attempts < 3` so a
+    genuinely cover-less record isn't hit every refresh.
+  - **`record_id` / permalink** — `CatalogHit.recordID` (the `data-ajax` value, e.g. `AK34420649`) is
+    stored in `media_details.record_id`; Fundus builds the site's "Kopierlink"
+    `…/aDISWeb/app/prod00?sp=S<record_id>` from it. `detail_version` marks the parser generation
+    (4 = record_id); the backfill re-reads every found row once per generation. It deliberately
+    **includes** `source='tonie'` rows: `updateDetailFields` touches neither `cover_path` nor
+    `source`, so the my.tonies image survives, and a Tonie's EAN in `isbn` resolves in the catalog
+    just like an ISBN. `backfillOne` distinguishes a network failure (retry later) from a
+    successful-but-empty search (`markDetailBackfilled`) — otherwise such a row is re-crawled forever.
   - **`ToniesEnricher`** — Tonie cover images from **my.tonies.com** (GraphQL, OAuth via
     `ToniesAuth`, one call per refresh). The Tonie chip id is unrelated to the VÖBB barcode, so the
     only join is a **fuzzy title-token match** (`ToniesEnricher.tokens` / `bestMatch`, confident hits
@@ -90,6 +107,13 @@ entire contract.
   via `tableExists`), so a DB without Fundus behaves exactly as before instead of failing `prepare`.
   The override is purely additive — it can pull an item into the pass, never remove one VÖBB already
   types as a Tonie. (A match still requires the Tonie to be in the user's my.tonies.com collection.)
+- **Manual rescrape (`fundus_rescrape`):** Fundus flags an item for a fresh crawl (independent of any
+  ISBN change) by writing `media_number` + `requested_at`. `mediaNeedingRescrape()` treats a row as
+  pending only while `requested_at` is newer than that item's `media_details.fetched_at`, so a
+  completed crawl retires the request on its own — voebbar **never writes back** into the
+  Fundus-owned table, and the one-directional contract holds. Rescrape re-searches by the item's
+  ISBN override if there is one, else by title. For a Tonie this briefly flips `source` back to
+  `'title'`; `ToniesEnricher` runs afterwards in the same refresh and restores the Tonie image.
 
 ### UI controllers
 All windows are built by hand with explicit `NSRect` frames (no `.xib`/storyboard, minimal Auto Layout) — adjusting one element's position usually means recomputing the y-coordinates of everything below/above it in the same window.
