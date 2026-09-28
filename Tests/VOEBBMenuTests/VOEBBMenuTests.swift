@@ -31,11 +31,11 @@ import Testing
 
 @Suite struct TitleColumnTests {
     @Test func fullCell() {
-        let p = HTMLParser.parseTitleColumn("[Tonie]<br>Räuber Ratte<br>Tonie Donaldson<br>03794357710")
+        let p = HTMLParser.parseTitleColumn("[Tonie]<br>Räuber Ratte<br>Tonie Donaldson<br>10000000042")
         #expect(p.typeTag == "[Tonie]")
         #expect(p.title == "Räuber Ratte")
         #expect(p.signature == "Tonie Donaldson")
-        #expect(p.mediaNumber == "03794357710")
+        #expect(p.mediaNumber == "10000000042")
     }
 
     @Test(arguments: ["<br/>", "<br />", "<BR>", "<Br/>"])
