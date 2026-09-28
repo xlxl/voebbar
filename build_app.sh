@@ -75,20 +75,31 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-# Sign with a stable identity when one exists, so the Keychain recognises rebuilds as the SAME
-# app and stops re-prompting for the stored passwords/tokens after every deploy. One-time setup:
-# Schlüsselbundverwaltung → Zertifikatsassistent → "Ein Zertifikat erstellen …" → Name
-# "VOEBBMenu Dev", Typ "Codesignierung". Then click "Immer erlauben" once per Keychain item.
-# Override the identity with `SIGN_IDENTITY=... ./build_app.sh`; without a matching identity the
-# bundle stays ad-hoc signed (previous behaviour).
-# Note: NOT `-v` — a self-signed cert is CSSMERR_TP_NOT_TRUSTED and would be filtered out, but
-# codesign happily signs with it locally and only a *stable* identity matters for the Keychain.
-SIGN_IDENTITY="${SIGN_IDENTITY:-VOEBBMenu Dev}"
-if security find-identity -p codesigning 2>/dev/null | grep -q "\"$SIGN_IDENTITY\""; then
+# Sign so the Keychain recognises rebuilds as the SAME app. Two checks decide that, and both must
+# hold: the item's ACL (matched by the designated requirement — any stable identity passes) AND its
+# partition list, which macOS derives from the signing cert's Team ID. Only a cert WITH a Team ID
+# yields a stable partition (`teamid:…`); a self-signed cert has none, so macOS falls back to the
+# per-build `cdhash:…` and prompts after every rebuild (that's how the items piled up 25 cdhashes).
+#
+# Preferred: a valid "Apple Development" cert (free Apple-ID team; create/renew in Xcode →
+# Einstellungen → Accounts → Manage Certificates). Picked by SHA-1 hash, because an expired
+# predecessor with the same name makes the name ambiguous. Fallback: the self-signed
+# "VOEBBMenu Dev" (stable ACL, but prompts every build), else ad-hoc.
+# Override with `SIGN_IDENTITY=<name or hash> ./build_app.sh`.
+if [ -z "${SIGN_IDENTITY:-}" ]; then
+    SIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk '/"Apple Development: / { print $2; exit }')
+fi
+# Note: NOT `-v` here — a self-signed cert is CSSMERR_TP_NOT_TRUSTED and would be filtered out.
+if [ -z "$SIGN_IDENTITY" ] && security find-identity -p codesigning 2>/dev/null | grep -q '"VOEBBMenu Dev"'; then
+    SIGN_IDENTITY="VOEBBMenu Dev"
+    echo "Warning: no valid Apple Development cert — signing with 'VOEBBMenu Dev' (Keychain will prompt after each rebuild)."
+fi
+if [ -n "$SIGN_IDENTITY" ]; then
     codesign --force -s "$SIGN_IDENTITY" "$APP_DIR"
-    echo "Signed with identity: $SIGN_IDENTITY"
+    echo "Signed with identity: $(codesign -dv --verbose=2 "$APP_DIR" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
 else
-    echo "No signing identity '$SIGN_IDENTITY' found — leaving ad-hoc signature (Keychain will re-prompt after deploys)."
+    echo "No signing identity found — leaving ad-hoc signature (Keychain will re-prompt after deploys)."
 fi
 
 echo "App bundle created at: $APP_DIR"
@@ -128,7 +139,7 @@ cp -R "$APP_DIR" "$DEPLOY_APP"
 # Verify the deployed copy really carries the stable identity — an ad-hoc bundle here would
 # re-prompt on every rebuild, which is the whole thing this deploy step exists to prevent.
 if codesign --verify --strict "$DEPLOY_APP" 2>/dev/null; then
-    echo "Signature OK: $(codesign -dv "$DEPLOY_APP" 2>&1 | grep '^Authority=' | head -1)"
+    echo "Signature OK: $(codesign -dv --verbose=2 "$DEPLOY_APP" 2>&1 | grep -E '^(Authority|TeamIdentifier)=' | sed -n '1p;$p' | tr '\n' ' ')"
 else
     echo "Warning: signature check failed for $DEPLOY_APP (ad-hoc? expect Keychain prompts)."
 fi
