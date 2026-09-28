@@ -146,6 +146,18 @@ struct RenewalOutcome {
     }
 }
 
+/// A reserved item waiting for pickup ("Bereitstellung"). Info only — no action.
+struct PickupItem: Equatable {
+    let title: String
+    /// Barcode from the title cell; empty when VÖBB shows none.
+    var mediaNumber: String = ""
+    /// Pickup deadline as shown (e.g. "19.09.2026").
+    let readyUntilString: String
+    let readyUntil: Date?
+    /// Pickup location, raw "Bezirk: Name".
+    let library: String
+}
+
 struct AccountData {
     let account: LibraryAccount
     var loans: [Loan] = []
@@ -158,6 +170,9 @@ struct AccountData {
     /// VÖBB's own card-expiry warning ("Ausweis läuft in N Tagen ab"), present exactly when the
     /// website shows it.
     var cardExpiryWarning: String?
+    /// Items ready for pickup. nil = not known this refresh (unreadable/failed) — the archive then
+    /// leaves the account's pickups untouched; [] = definitely none.
+    var pickups: [PickupItem]?
     var lastUpdated: Date = Date()
     var error: String?
 

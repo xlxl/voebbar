@@ -543,6 +543,28 @@ final class StatusBarController: NSObject {
             )
         }
 
+        // Abholbereite Vormerkungen — one line (earliest deadline), titles in the submenu. Info only.
+        if let pickups = data.pickups, !pickups.isEmpty {
+            let sorted = pickups.sorted { ($0.readyUntil ?? .distantFuture) < ($1.readyUntil ?? .distantFuture) }
+            let until = sorted.first.map { String($0.readyUntilString.prefix(6)) } ?? ""
+            let pickupItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            pickupItem.attributedTitle = NSAttributedString(
+                string: "  ⤓  \(pickups.count) abholbereit\(until.isEmpty ? "" : " (bis \(until))")",
+                attributes: [.foregroundColor: NSColor.systemBlue, .font: NSFont.menuFont(ofSize: 0)]
+            )
+            let pickupMenu = NSMenu()
+            pickupMenu.autoenablesItems = false
+            for p in sorted {
+                let title = truncate(p.title.components(separatedBy: " / ").first ?? p.title, to: Self.maxTitleLength)
+                let row = NSMenuItem(title: "\(title) · bis \(String(p.readyUntilString.prefix(6)))", action: nil, keyEquivalent: "")
+                row.toolTip = "\(p.title)\nAbholbereit bis \(p.readyUntilString)\n\(p.library)"
+                row.isEnabled = false
+                pickupMenu.addItem(row)
+            }
+            pickupItem.submenu = pickupMenu
+            menu.addItem(pickupItem)
+        }
+
         // Summary line. Fees only appear when there is something to say (due or unknown).
         var parts: [String] = []
         if data.loans.isEmpty {

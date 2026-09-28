@@ -447,3 +447,56 @@ import Testing
         #expect(LibraryName.short("Steglitz-Zehlendorf: Stadtteilbibliothek Neuerfunden") == "Neuerfunden")
     }
 }
+
+// MARK: - Pickups ("Bereitstellungen")
+
+@Suite struct PickupTests {
+    /// Shape of the live pickups page: heading, "Zur Übersicht" buttons, 4-cell rows.
+    static let page = """
+    <title>Meine Ausleihen - VÖBB</title>
+    <h1><span>Mein Konto - Bereitstellungen</span></h1>
+    <input type="submit" class="imp-button loeschen" value="Markierte Medien löschen" name="$Button$0">
+    <input type="submit" class="uebersicht" value="Zur Übersicht" name="$Button$1">
+    <table class="rTable_table"><tbody>
+    <tr class=" rTable_tr_even " role="row"><td class=" rTable_td_check"><input type="checkbox" name="$RTable_checkbox[]" value="CheckCell"></td><td class=" rTable_td_text">19.09.2026</td><td class=" rTable_td_text">Bezirk: Musterbibliothek</td><td class=" rTable_td_text">Ein Titel / X<br>5.1 Abc<br>10000000099</td></tr>
+    </tbody></table>
+    """
+
+    @Test func countFromOverview() {
+        #expect(HTMLParser.parsePickupCount(#"<div id="konto-services">Keine Bereitstellungen</div>"#) == 0)
+        #expect(HTMLParser.parsePickupCount(#"<div id="konto-services"><a>1 Bereitstellung</a></div>"#) == 1)
+        #expect(HTMLParser.parsePickupCount(#"<div id="konto-services"><a>3 Bereitstellungen</a></div>"#) == 3)
+        #expect(HTMLParser.parsePickupCount(#"<div id="konto-services">12 Ausleihen</div>"#) == nil)
+    }
+
+    @Test func parsesRows() {
+        let items = HTMLParser.parsePickups(Self.page)
+        #expect(items.count == 1)
+        #expect(items.first?.title == "Ein Titel / X")
+        #expect(items.first?.mediaNumber == "10000000099")
+        #expect(items.first?.readyUntilString == "19.09.2026")
+        #expect(items.first?.library == "Bezirk: Musterbibliothek")
+    }
+
+    @Test func loansPageIsNotAPickupsPage() {
+        // Same <title>, same row class — only the heading differs.
+        let loans = Self.page.replacingOccurrences(of: "Mein Konto - Bereitstellungen", with: "Mein Konto - Ausleihen")
+        #expect(HTMLParser.parsePickups(loans).isEmpty)
+    }
+
+    @Test func backButtonFoundByLabelNeverTheDeleteButton() {
+        #expect(HTMLParser.findSubmitButton(labelContaining: "Zur Übersicht", in: Self.page) == "$Button$1")
+        #expect(HTMLParser.findSubmitButton(labelContaining: "Zur Übersicht", in: "<html></html>") == nil)
+    }
+
+    @Test func overviewDetection() {
+        #expect(HTMLParser.isOverviewPage(#"<title>Mein Konto - VÖBB</title><div id="konto-services">2 Ausleihen</div>"#))
+        #expect(!HTMLParser.isOverviewPage(Self.page))
+    }
+
+    @Test func isoDayWithoutTimezoneShift() {
+        #expect(ArchiveStore.isoDay(fromGerman: "19.09.2026") == "2026-09-19")
+        #expect(ArchiveStore.isoDay(fromGerman: "1.2.2027") == "2027-02-01")
+        #expect(ArchiveStore.isoDay(fromGerman: "") == "")
+    }
+}

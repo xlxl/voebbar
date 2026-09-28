@@ -120,9 +120,25 @@ final class ArchiveStore {
             created_at   TEXT NOT NULL DEFAULT ''
         );
         """)
+        // Items ready for pickup ("Bereitstellungen"). voebbar writes, Fundus reads (return
+        // checklist). A CURRENT SNAPSHOT, not history: each successfully read account's rows are
+        // replaced; an account whose pickups are unknown this refresh stays untouched.
+        exec("""
+        CREATE TABLE IF NOT EXISTS pickups (
+            account_card TEXT NOT NULL,
+            account_name TEXT NOT NULL,
+            media_number TEXT NOT NULL,             -- barcode, else 't:<title>|<library>' (like borrow_events)
+            title        TEXT NOT NULL,
+            library      TEXT NOT NULL DEFAULT '',  -- raw "Bezirk: Name" pickup location
+            ready_until  TEXT NOT NULL DEFAULT '',  -- yyyy-MM-dd pickup deadline, '' if unknown
+            first_seen   TEXT NOT NULL,
+            last_seen    TEXT NOT NULL,
+            PRIMARY KEY (account_card, media_number)
+        );
+        """)
         // Schema marker for external tools only — neither voebbar nor Fundus reads it (checked
         // 2026-09). Kept because the DB is shared; bump it with schema changes.
-        exec("PRAGMA user_version=4;")
+        exec("PRAGMA user_version=5;")
     }
 
     // MARK: - Per-account write
@@ -144,6 +160,54 @@ final class ArchiveStore {
 
         // Reconcile returns: open events of this account no longer present → returned.
         markReturned(card: card, keeping: seenKeys, now: now)
+
+        if let pickups = data.pickups {
+            recordPickups(pickups, card: card, name: data.account.name, now: now)
+        }
+    }
+
+    /// Replaces this account's pickup snapshot: upsert what's listed now (keeping `first_seen`),
+    /// delete what's gone (picked up or expired). One transaction, so Fundus never sees it half-done.
+    private func recordPickups(_ pickups: [PickupItem], card: String, name: String, now: String) {
+        exec("BEGIN;")
+        var keys: [String] = []
+        for p in pickups {
+            let key = p.mediaNumber.isEmpty ? "t:\(p.title)|\(p.library)" : p.mediaNumber
+            keys.append(key)
+            var stmt: OpaquePointer?
+            let sql = """
+            INSERT INTO pickups (account_card, account_name, media_number, title, library, ready_until, first_seen, last_seen)
+            VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(account_card, media_number) DO UPDATE SET
+                account_name=excluded.account_name, title=excluded.title, library=excluded.library,
+                ready_until=excluded.ready_until, last_seen=excluded.last_seen;
+            """
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                bind(stmt, 1, card)
+                bind(stmt, 2, name)
+                bind(stmt, 3, key)
+                bind(stmt, 4, p.title)
+                bind(stmt, 5, p.library)
+                bind(stmt, 6, Self.isoDay(fromGerman: p.readyUntilString))
+                bind(stmt, 7, now)
+                bind(stmt, 8, now)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+        // Everything of this account not seen in this refresh is gone.
+        var stmt: OpaquePointer?
+        let placeholders = keys.map { _ in "?" }.joined(separator: ",")
+        let sql = keys.isEmpty
+            ? "DELETE FROM pickups WHERE account_card=?;"
+            : "DELETE FROM pickups WHERE account_card=? AND media_number NOT IN (\(placeholders));"
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            bind(stmt, 1, card)
+            for (i, key) in keys.enumerated() { bind(stmt, Int32(i + 2), key) }
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+        exec("COMMIT;")
     }
 
     /// Stable identity: the barcode when present, else a title+library fallback.
@@ -621,4 +685,13 @@ final class ArchiveStore {
     }()
 
     private static func isoDate(_ date: Date) -> String { dateFormatter.string(from: date) }
+
+    /// "19.09.2026" → "2026-09-19" by plain string surgery (no Date round-trip, so no timezone
+    /// shift); '' for anything else.
+    static func isoDay(fromGerman s: String) -> String {
+        let parts = s.split(separator: ".").map(String.init)
+        guard parts.count == 3, let d = Int(parts[0]), let m = Int(parts[1]), let y = Int(parts[2]),
+              (1...31).contains(d), (1...12).contains(m), y > 1900 else { return "" }
+        return String(format: "%04d-%02d-%02d", y, m, d)
+    }
 }

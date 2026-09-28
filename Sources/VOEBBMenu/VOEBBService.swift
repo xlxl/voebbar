@@ -87,9 +87,62 @@ final class VOEBBSession {
             }
         }
 
+        // Pickups ("Bereitstellungen"), only when the overview announces some. aDIS silently
+        // ignores a list→list navigation (after *SZA, *SZS returns the loans again), so go back
+        // via the page's "Zur Übersicht" button first. Never press anything on the pickups page
+        // itself — it carries "Markierte Medien löschen". Fallback: a fresh session.
+        switch HTMLParser.parsePickupCount(overviewHTML) {
+        case .some(0):
+            data.pickups = []
+        case .some(let expected):
+            var pickups: [PickupItem]?
+            do {
+                let overviewAgain = try await returnToOverview(appURL: appURL, fromHTML: currentHTML)
+                let (html, _) = try await navigate(appURL: appURL, fromHTML: overviewAgain, navCode: "*SZS")
+                currentHTML = html
+                if HTMLParser.isPickupsPage(html) { pickups = HTMLParser.parsePickups(html) }
+            } catch {
+                // Back-navigation or *SZS failed → fresh session below
+            }
+            if pickups == nil {
+                pickups = try? await VOEBBSession(account: account).fetchPickups(password: password)
+            }
+            // A short list would drop pickups from the archive snapshot — treat it as unknown.
+            if let pickups, pickups.count >= expected { data.pickups = pickups }
+        case .none:
+            break  // unknown → archive leaves this account's pickups untouched
+        }
+
         await logout(appURL: appURL, fromHTML: currentHTML)
         data.lastUpdated = Date()
         return data
+    }
+
+    /// Back to the account overview via the current page's "Zur Übersicht" button (looked up by
+    /// label — its $Button$N differs per page). Returns the page unchanged if it already is the
+    /// overview; throws if there's no such button or the response isn't the overview.
+    private func returnToOverview(appURL: String, fromHTML: String) async throws -> String {
+        if HTMLParser.isOverviewPage(fromHTML) { return fromHTML }
+        guard let button = HTMLParser.findSubmitButton(labelContaining: "Zur Übersicht", in: fromHTML) else {
+            throw VOEBBError.parseError("„Zur Übersicht“-Button nicht gefunden")
+        }
+        let html = try await pressButton(appURL: appURL, fromHTML: fromHTML, referer: appURL,
+                                         buttonField: button, focusID: "", checkboxValues: [])
+        guard HTMLParser.isOverviewPage(html) else {
+            throw VOEBBError.parseError("Rücksprung lieferte keine Kontoübersicht")
+        }
+        return html
+    }
+
+    /// Fallback in a fresh session: login → pickups (*SZS) → logout.
+    private func fetchPickups(password: String) async throws -> [PickupItem] {
+        let (appURL, overviewHTML) = try await login(password: password)
+        let (html, _) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZS")
+        await logout(appURL: appURL, fromHTML: html)
+        guard HTMLParser.isPickupsPage(html) else {
+            throw VOEBBError.parseError("Bereitstellungs-Seite nicht erkannt")
+        }
+        return HTMLParser.parsePickups(html)
     }
 
     /// Fees, pickup code, card validity and VÖBB's expiry warning from the overview's `<dt>/<dd>`
@@ -225,7 +278,7 @@ final class VOEBBSession {
         }
 
         // Step 2: renew only the confirmed-renewable candidates ($Button$1).
-        let resultHTML = try await pressRenewalButton(
+        let resultHTML = try await pressButton(
             appURL: appURL, fromHTML: probe.html, referer: appURL,
             buttonField: "$Button$1", focusID: "$$GFBO_4",
             checkboxValues: renewable.map(\.checkboxValue)
@@ -254,7 +307,7 @@ final class VOEBBSession {
         appURL: String, fromHTML: String, referer: String,
         checkboxValues: [String]
     ) async throws -> (html: String, rows: [RenewabilityRow]) {
-        let html = try await pressRenewalButton(
+        let html = try await pressButton(
             appURL: appURL, fromHTML: fromHTML, referer: referer,
             buttonField: "$Button$2", focusID: "$$GFBO_7",
             checkboxValues: checkboxValues
@@ -262,10 +315,10 @@ final class VOEBBSession {
         return (html, HTMLParser.parseRenewability(html))
     }
 
-    /// Presses one of the renewal-page buttons by re-POSTing the page's hidden fields plus the
+    /// Presses a `$Button$N` submit button (renewal buttons, "Zur Übersicht") by re-POSTing the page's hidden fields plus the
     /// selected checkboxes. aDISWeb expects duplicate `$RTable_checkbox[]` keys, so the body is
     /// encoded manually (URLSession can't send duplicate keys via a dictionary).
-    private func pressRenewalButton(
+    private func pressButton(
         appURL: String, fromHTML: String, referer: String,
         buttonField: String, focusID: String,
         checkboxValues: [String]

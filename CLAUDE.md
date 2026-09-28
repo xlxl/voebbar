@@ -29,6 +29,7 @@ This is the core and most fragile part of the app. VÖBB's site (`aDISWeb`, an A
 - `login()` scrapes a session ID out of an HTML form action, POSTs a nav request, then POSTs credentials.
 - `navigate()` "changes pages" by re-POSTing the current page's hidden `<input>` fields plus a `selected` field encoding a nav code (e.g. `*SZA` = loans list, `*SE` = logout). The page's `requestCount` is echoed back unchanged (`requiredRequestCount` refuses to send without one) — never hardcode it. Every page carries a single-use identity token, so each request must start from the page loaded last; every session ends with a best-effort `*SE` logout.
 - Fees, pickup code ("Abholcode"), card validity and VÖBB's card-expiry warning ("Achtung") come from the overview page's `<dt>/<dd>` list (`parseAccountInfo`), not from `*SGG`: navigating `*SGG` from the probe result page is silently ignored by aDIS and returned the loans page again (fees read as 0 €). An unrecognizable overview sets `feesUnknown` instead of reporting 0.
+- Pickups ("Bereitstellungen", `*SZS`) are fetched only when the overview announces some. aDIS silently ignores a list→list navigation (after `*SZA`, `*SZS` returns the loans again), so the flow goes back via the page's "Zur Übersicht" button first (`findSubmitButton` by label — its `$Button$N` differs per page; `isOverviewPage` validates), with a fresh-session fallback. Nothing is ever pressed on the pickups page: it carries "Markierte Medien löschen". `AccountData.pickups == nil` means unknown (not fetched, or fewer rows than announced).
 - `validateLoans` is the parse monitor: fewer (or no) parsed loans than the overview announces throws a `parseBrokenMarker` error instead of an empty/short list — the archive would otherwise close open loans as returned. It runs on refresh and before every renewal.
 - Parsing relies on VÖBB's markup (row class `rTable_tr`, literal status substrings like `"nicht verlängerbar"`). It has broken before when VÖBB changed its markup — see commits `54e9f39` and `bff5340`. Any change to `HTMLParser.swift` or the nav-code POSTs should be treated as coupled to VÖBB's current HTML, not a stable contract.
 - Loan-row columns are parsed **by position** (`td[0]`=checkbox, `td[1]`=due date, `td[2]`=library, `td[3]`=title, `td[4]`=status), NOT by td class: cells with red hints (Vormerkung, "nicht verlängerbar") use class `zellef` instead of `rTable_td_text`, so class-based filtering silently drops exactly the rows that carry problems.
@@ -56,7 +57,9 @@ entire contract.
   reconciles returns (open rows of a **successfully fetched** account no longer seen → `is_open=0`;
   an account with a fetch *error* is skipped entirely, never mass-closed). voebbar owns and writes
   `borrow_events` and `media_details`; Fundus reads them and adds its own `fundus_*` tables to the
-  same DB. What voebbar reads back from Fundus is **`media_isbn_override`** plus exactly two
+  same DB. voebbar also writes **`pickups`**: a current snapshot (not history) of items ready for
+  pickup, replaced per account in one transaction when that account's pickups were read; an account
+  with `pickups == nil` is left untouched. Fundus shows it in its return checklist. What voebbar reads back from Fundus is **`media_isbn_override`** plus exactly two
   Fundus-owned tables — **`fundus_media_types`** (Tonie-image gate, below) and **`fundus_rescrape`**
   (manual re-crawl, below). Both are read through `tableExists` guards and never written.
 - **Enrichment runs after each refresh**, orchestrated in `StatusBarController.refresh()`:

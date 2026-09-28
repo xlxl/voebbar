@@ -91,6 +91,78 @@ enum HTMLParser {
         )
     }
 
+    // MARK: - Pickups ("Bereitstellungen")
+
+    /// Pickup count from the overview's service block: "Keine Bereitstellungen" → 0,
+    /// "1 Bereitstellung" / "2 Bereitstellungen" → n, unrecognizable → nil.
+    static func parsePickupCount(_ html: String) -> Int? {
+        let servicesHTML = extractKontoServices(html) ?? html
+        if servicesHTML.contains("Keine Bereitstellungen") { return 0 }
+        let regex = try! NSRegularExpression(pattern: #"(\d+)\s+Bereitstellung"#)
+        guard let m = regex.firstMatch(in: servicesHTML, range: NSRange(servicesHTML.startIndex..., in: servicesHTML)),
+              let r = Range(m.range(at: 1), in: servicesHTML) else { return nil }
+        return Int(servicesHTML[r])
+    }
+
+    /// The pickups list shares its <title> with the loans list ("Meine Ausleihen"); only the
+    /// page heading tells them apart.
+    static func isPickupsPage(_ html: String) -> Bool {
+        html.contains("Mein Konto - Bereitstellungen")
+    }
+
+    /// Rows of the pickups list, by position like the loans list: [0]=checkbox, [1]=deadline
+    /// ("Bis"), [2]=pickup location, [3]=title cell (title<br>signature<br>barcode).
+    /// Returns [] for any page that isn't recognizably the pickups list.
+    static func parsePickups(_ html: String) -> [PickupItem] {
+        guard isPickupsPage(html) else { return [] }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd.MM.yyyy"
+        formatter.locale = Locale(identifier: "de_DE")
+
+        let trPattern = try! NSRegularExpression(
+            pattern: #"<tr[^>]*class="[^"]*rTable_tr[^"]*"[^>]*>(.*?)</tr>"#,
+            options: [.dotMatchesLineSeparators, .caseInsensitive]
+        )
+        var items: [PickupItem] = []
+        for match in trPattern.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+            guard let rowRange = Range(match.range(at: 1), in: html) else { continue }
+            let cols = extractAllTDContents(String(html[rowRange]))
+            guard cols.count >= 4 else { continue }
+            let parsedTitle = parseTitleColumn(cols[3])
+            guard !parsedTitle.title.isEmpty else { continue }
+            let dateStr = stripHTML(cols[1]).trimmingCharacters(in: .whitespaces)
+            items.append(PickupItem(
+                title: parsedTitle.title,
+                mediaNumber: parsedTitle.mediaNumber,
+                readyUntilString: dateStr,
+                readyUntil: formatter.date(from: dateStr),
+                library: stripHTML(cols[2]).trimmingCharacters(in: .whitespaces)
+            ))
+        }
+        return items
+    }
+
+    /// `name` of the submit button whose label contains `label` (e.g. "Zur Übersicht") — its
+    /// `$Button$N` number differs per page, so it is looked up by label, never hardcoded.
+    static func findSubmitButton(labelContaining label: String, in html: String) -> String? {
+        let pattern = try! NSRegularExpression(pattern: #"<input[^>]+type=['"]submit['"][^>]*>"#, options: .caseInsensitive)
+        for match in pattern.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+            guard let range = Range(match.range, in: html) else { continue }
+            let tag = String(html[range])
+            guard let value = ADISForm.attr(tag, "value"), value.contains(label),
+                  let name = ADISForm.attr(tag, "name") else { continue }
+            return name
+        }
+        return nil
+    }
+
+    /// Account overview: <title> "Mein Konto …" (the lists are titled "Meine Ausleihen") and a
+    /// recognizable service block. Checked after "Zur Übersicht" before navigating on from it.
+    static func isOverviewPage(_ html: String) -> Bool {
+        guard html.range(of: #"<title>\s*Mein Konto\b"#, options: .regularExpression) != nil else { return false }
+        return parseLoanCount(html) != nil || parsePickupCount(html) != nil
+    }
+
     // MARK: - Account info (overview page <dt>/<dd> list)
 
     /// One value of the overview page's `<dt>/<dd>` list ("Fällige Gebühren", "Abholcode",
