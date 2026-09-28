@@ -221,7 +221,13 @@ final class ArchiveStore {
 
     // MARK: - Media details (enrichment from VÖBB's catalog)
 
-    struct EnrichTarget { let mediaNumber: String; let title: String }
+    struct EnrichTarget {
+        let mediaNumber: String
+        let title: String
+        /// Typed Tonie by VÖBB or by a Fundus correction — as opposed to a CD/Hörbuch that is only
+        /// a Tonie candidate. Set by `toniesNeedingImage()` only.
+        var isTonie = false
+    }
     struct ISBNOverride { let mediaNumber: String; let isbn: String }
 
     /// Items in borrow_events not yet in media_details (neither 'found' nor 'notfound').
@@ -286,7 +292,7 @@ final class ArchiveStore {
                 : ""
             let overrideMatch = hasOverrides ? " OR f.media_type = 'Tonie'" : ""
             let sql = """
-            SELECT b.media_number, b.title FROM borrow_events b
+            SELECT b.media_number, b.title, MAX(b.media_type = 'Tonie'\(overrideMatch)) FROM borrow_events b
             LEFT JOIN media_details d ON d.media_number = b.media_number
             \(overrideJoin)
             WHERE b.media_number <> ''
@@ -299,7 +305,8 @@ final class ArchiveStore {
             defer { sqlite3_finalize(stmt) }
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             while sqlite3_step(stmt) == SQLITE_ROW {
-                out.append(EnrichTarget(mediaNumber: col(stmt, 0), title: col(stmt, 1)))
+                out.append(EnrichTarget(mediaNumber: col(stmt, 0), title: col(stmt, 1),
+                                        isTonie: sqlite3_column_int(stmt, 2) != 0))
             }
             return out
         }
