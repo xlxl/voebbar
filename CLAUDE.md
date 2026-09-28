@@ -1,17 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## What this is
 
 A native macOS menu bar (status item) app that shows loan/due-date info from VÖBB (Verbund der Öffentlichen Bibliotheken Berlins) for one or more library cards. Pure AppKit, no SwiftUI, no Xcode project — built entirely via Swift Package Manager. Runs as an accessory app (`LSUIElement`, no Dock icon).
 
 ## Build & run
-
-```
-swift build                 # debug build
-swift build -c release      # release build
-```
 
 To produce a runnable `.app` bundle:
 
@@ -20,7 +13,7 @@ To produce a runnable `.app` bundle:
 DEPLOY=0 ./build_app.sh     # build only, leave VOEBBMenu.app in the repo
 ```
 
-`build_app.sh` builds the release binary, assembles `VOEBBMenu.app/Contents/{MacOS,Resources}`, writes `Info.plist` (bundle id `de.voebb.menubar`, `LSUIElement=true`, min macOS 13), and bundles an icon from `AppIcon.icns` (override with `ICON_SRC=…`, silently skipped when absent).
+`build_app.sh` assembles and signs the bundle (icon source overridable with `ICON_SRC=…`, silently skipped when absent).
 
 It then signs with the self-signed identity **`VOEBBMenu Dev`** (override via `SIGN_IDENTITY`; falls back to ad-hoc with a warning) and — unless `DEPLOY=0` — quits the running instance, moves the bundle to `/Applications/VOEBBMenu.app` (`DEPLOY_DIR`), verifies the signature there, **deletes the repo copy**, and launches the deployed app. Both halves matter for the Keychain: the stored VÖBB passwords / Tonies token live in the legacy (ACL-based) Keychain, whose grant is bound to the trusted app's signature **and launch path**. A stable identity keeps rebuilds silent only as long as the app always starts from the same path — launching the repo-local bundle counts as a different app and re-prompts, which is why the repo copy is removed. Detecting the identity uses `security find-identity -p codesigning` *without* `-v`: a self-signed cert is `CSSMERR_TP_NOT_TRUSTED` and would be filtered out by `-v`.
 
@@ -29,9 +22,6 @@ It then signs with the self-signed identity **`VOEBBMenu Dev`** (override via `S
 No linter/formatter is configured.
 
 ## Architecture
-
-### Entry point
-`main.swift` sets `.accessory` activation policy and hands off to `AppDelegate`, which owns a single `StatusBarController` and wires it to `PreferencesWindowController.shared`.
 
 ### VOEBBSession — screen-scraping client (`VOEBBService.swift`)
 This is the core and most fragile part of the app. VÖBB's site (`aDISWeb`, an ADIS-based legacy system) is a form-based, session-driven web app with no public API — there is no DOM parser, everything is regex-based HTML scraping (`HTMLParser.swift`).
@@ -118,9 +108,5 @@ entire contract.
 ### UI controllers
 All windows are built by hand with explicit `NSRect` frames (no `.xib`/storyboard, minimal Auto Layout) — adjusting one element's position usually means recomputing the y-coordinates of everything below/above it in the same window.
 
-- `StatusBarController` — the `NSStatusItem` and its dropdown menu (per-account submenus, refresh/renew actions, auto-refresh timer).
 - `PreferencesWindowController` (singleton) — account add/remove, plus two symmetric settings rows of custom pill-style `NSButton`s (built by hand via `makePillRow`/`stylePills`, not `NSSegmentedControl`): refresh interval and renewal "due soon" threshold.
 - `OverviewWindowController` (singleton) — sortable table of all loans across all accounts, with multi-row selection that can be renewed (row context menu + toolbar button, both routed through `StatusBarController.renewSelected` so menu and window share one confirm/network path). Rows keep the whole `LibraryAccount` (a selection must map back to card number + password), and every `reloadData()` remaps the selection by account+`renewalKey` — row *indexes* survive a re-sort, so without that the selection would silently point at other media.
-
-### Data flow
-`StatusBarController.refresh()` reads accounts from `AccountStorage`, creates one `VOEBBSession` per account (fresh `URLSessionConfiguration.ephemeral`, no cookie persistence across sessions), fetches `AccountData` for each, then updates the status bar menu and pushes results into `OverviewWindowController`.
