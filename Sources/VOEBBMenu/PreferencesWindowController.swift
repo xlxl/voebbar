@@ -307,33 +307,33 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         saveBtn.target = self
         saveBtn.action = #selector(saveAccount)
 
-        // Store fields for access in save action
-        objc_setAssociatedObject(sheet, &AssocKeys.nameField, nameField, .OBJC_ASSOCIATION_RETAIN)
-        objc_setAssociatedObject(sheet, &AssocKeys.cardField, cardField, .OBJC_ASSOCIATION_RETAIN)
-        objc_setAssociatedObject(sheet, &AssocKeys.pwdField, pwdField, .OBJC_ASSOCIATION_RETAIN)
-
         win.beginSheet(sheet) { _ in }
-        currentSheet = sheet
+        currentSheet = AddAccountSheet(window: sheet, nameField: nameField, cardField: cardField, pwdField: pwdField)
     }
 
-    private var currentSheet: NSWindow?
+    /// The open "Konto hinzufügen" sheet and the fields the save action reads.
+    private struct AddAccountSheet {
+        let window: NSWindow
+        let nameField: NSTextField
+        let cardField: NSTextField
+        let pwdField: NSSecureTextField
+    }
+
+    private var currentSheet: AddAccountSheet?
 
     @objc private func dismissSheet() {
-        guard let sheet = currentSheet, let win = window else { return }
+        guard let sheet = currentSheet?.window, let win = window else { return }
         win.endSheet(sheet)
         currentSheet = nil
     }
 
     @objc private func saveAccount() {
-        guard let sheet = currentSheet, let win = window else { return }
+        guard let current = currentSheet, let win = window else { return }
+        let sheet = current.window
 
-        let nameField = objc_getAssociatedObject(sheet, &AssocKeys.nameField) as? NSTextField
-        let cardField = objc_getAssociatedObject(sheet, &AssocKeys.cardField) as? NSTextField
-        let pwdField  = objc_getAssociatedObject(sheet, &AssocKeys.pwdField) as? NSSecureTextField
-
-        let name = nameField?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
-        let card = cardField?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
-        let pwd  = pwdField?.stringValue ?? ""
+        let name = current.nameField.stringValue.trimmingCharacters(in: .whitespaces)
+        let card = current.cardField.stringValue.trimmingCharacters(in: .whitespaces)
+        let pwd  = current.pwdField.stringValue
 
         guard !name.isEmpty, !card.isEmpty, !pwd.isEmpty else {
             let alert = NSAlert()
@@ -368,11 +368,4 @@ extension PreferencesWindowController: NSTableViewDataSource, NSTableViewDelegat
         }
         return cell
     }
-}
-
-// For associated objects keys
-private enum AssocKeys {
-    static var nameField: UInt8 = 0
-    static var cardField: UInt8 = 1
-    static var pwdField:  UInt8 = 2
 }
