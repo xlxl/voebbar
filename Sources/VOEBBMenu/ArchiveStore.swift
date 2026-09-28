@@ -95,7 +95,8 @@ final class ArchiveStore {
             interessenkreis TEXT NOT NULL DEFAULT '',   -- e.g. age recommendation
             detail_version  INTEGER NOT NULL DEFAULT 0,  -- bumped when the Vollanzeige fields are captured
             record_id       TEXT NOT NULL DEFAULT '',    -- aDIS record key (AK…); Fundus builds the Vollanzeige permalink from it
-            cover_attempts  INTEGER NOT NULL DEFAULT 0   -- failed VLB cover-heal tries; caps the retry loop
+            cover_attempts  INTEGER NOT NULL DEFAULT 0,  -- failed VLB cover-heal tries; caps the retry loop
+            notfound_attempts INTEGER NOT NULL DEFAULT 0 -- title searches that came back empty; caps the notfound retry
         );
         """)
         // Lightweight upgrade for DBs created before these columns existed. ALTER errors
@@ -106,7 +107,8 @@ final class ArchiveStore {
                     "interessenkreis TEXT NOT NULL DEFAULT ''",
                     "detail_version INTEGER NOT NULL DEFAULT 0",
                     "record_id TEXT NOT NULL DEFAULT ''",
-                    "cover_attempts INTEGER NOT NULL DEFAULT 0"] {
+                    "cover_attempts INTEGER NOT NULL DEFAULT 0",
+                    "notfound_attempts INTEGER NOT NULL DEFAULT 0"] {
             exec("ALTER TABLE media_details ADD COLUMN \(col);", ignoringErrors: true)
         }
         // Manual ISBN corrections. The archive app WRITES these; voebbar reads them and
@@ -262,6 +264,48 @@ final class ArchiveStore {
                 out.append(EnrichTarget(mediaNumber: col(stmt, 0), title: col(stmt, 1)))
             }
             return out
+        }
+    }
+
+    /// Title-searched items locked as 'notfound' that deserve another try: an empty search is not
+    /// always a real miss (VÖBB once answered a search that works fine a day later with a cover-less
+    /// page, and a loan-list title the catalog can't match used to be locked for good). Retried at
+    /// most `maxNotFoundAttempts` times in total, each after `notFoundRetryDays`. Rows from before
+    /// the counter existed (attempts = 0) are due at once, so the fallback search terms reach them.
+    func mediaNeedingNotFoundRetry() -> [EnrichTarget] {
+        return queue.sync {
+            guard db != nil else { return [] }
+            var out: [EnrichTarget] = []
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            let sql = """
+            SELECT d.media_number, b.title FROM media_details d
+            JOIN borrow_events b ON b.media_number = d.media_number
+            WHERE d.status = 'notfound' AND d.source = 'title'
+              AND d.notfound_attempts < \(Self.maxNotFoundAttempts)
+              AND (d.notfound_attempts = 0
+                   OR d.fetched_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-\(Self.notFoundRetryDays) days'))
+            GROUP BY d.media_number;
+            """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(EnrichTarget(mediaNumber: col(stmt, 0), title: col(stmt, 1)))
+            }
+            return out
+        }
+    }
+
+    static let maxNotFoundAttempts = 3
+    static let notFoundRetryDays = 3
+
+    func bumpNotFoundAttempt(mediaNumber: String) {
+        queue.sync {
+            guard db != nil else { return }
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, "UPDATE media_details SET notfound_attempts = notfound_attempts + 1 WHERE media_number=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+            bind(stmt, 1, mediaNumber)
+            sqlite3_step(stmt)
         }
     }
 

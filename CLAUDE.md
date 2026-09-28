@@ -65,8 +65,13 @@ entire contract.
     pending `media_isbn_override`s (search by ISBN, lock `source='manual'`), then new items (search by
     **title**, `source='title'`), then the Vollanzeige backfill for older `detail_version`s, then the
     cover self-heal. Later passes skip whatever an earlier one already covered this run. A
-    successful-but-empty search records `status='notfound'` so it is never re-crawled; a network error
-    leaves the item for a later run.
+    successful-but-empty search records `status='notfound'`; a network error leaves the item for a
+    later run. A title search walks `titleSearchTerms` (as is → rare diacritics folded → only the part
+    before " / "): the loan-list title carries the full responsibility statement, and one letter the
+    catalog index folds differently (e.g. "Ḥ") makes VÖBB answer "erfolglos". Title-`notfound` rows
+    are retried via `mediaNeedingNotFoundRetry()` — every `notFoundRetryDays`, capped by
+    `notfound_attempts < maxNotFoundAttempts` — because a single empty answer has turned out to be
+    transient (a search that returned nothing on one evening found the record the next day).
   - **Cover self-heal** — a transient download miss used to freeze a row as `status='found'` with an
     empty `cover_path`, and nothing retried it (`mediaNeedingEnrichment` only picks rows that don't
     exist). `coversNeedingHeal()` re-fetches the VLB cover directly — the URL is deterministic from

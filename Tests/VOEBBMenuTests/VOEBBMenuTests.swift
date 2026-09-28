@@ -199,3 +199,25 @@ import Testing
         #expect(ToniesEnricher.bestMatch(for: "Heavysaurus - Pommesgabel : Best of Dino Metal / X", in: pool) == nil)
     }
 }
+
+// MARK: - Catalog title search terms
+
+@Suite struct TitleSearchTermsTests {
+    @Test func foldsNonLatin1DiacriticsButKeepsGermanLetters() {
+        #expect(CatalogEnricher.foldRareDiacritics("Sasha Ḥaddad") == "Sasha Haddad")
+        #expect(CatalogEnricher.foldRareDiacritics("Übersetzer/in Größe Café") == "Übersetzer/in Größe Café")
+    }
+
+    @Test func fallsBackToFoldedThenBareTitle() {
+        let terms = CatalogEnricher.titleSearchTerms("Ob nah / Racha Mourtada [Textdichter/in] ; Sasha Ḥaddad [Illustrator/in]")
+        #expect(terms == ["Ob nah / Racha Mourtada [Textdichter/in] ; Sasha Ḥaddad [Illustrator/in]",
+                          "Ob nah / Racha Mourtada [Textdichter/in] ; Sasha Haddad [Illustrator/in]",
+                          "Ob nah"])
+    }
+
+    @Test func noDuplicateTermsForAPlainTitle() {
+        #expect(CatalogEnricher.titleSearchTerms("Räuber Ratte") == ["Räuber Ratte"])
+        #expect(CatalogEnricher.titleSearchTerms("Wohin fließt das Badewasser? : mit Klappen / Katja Reider")
+                == ["Wohin fließt das Badewasser? : mit Klappen / Katja Reider", "Wohin fließt das Badewasser? : mit Klappen"])
+    }
+}

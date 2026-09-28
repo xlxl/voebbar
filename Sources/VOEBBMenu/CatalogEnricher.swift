@@ -30,7 +30,8 @@ final class CatalogEnricher {
         let overrides = ArchiveStore.shared.pendingISBNOverrides()
             .filter { !rescrapeNumbers.contains($0.mediaNumber) }
         let skip = Set(overrides.map(\.mediaNumber)).union(rescrapeNumbers)
-        let targets = ArchiveStore.shared.mediaNeedingEnrichment()
+        // New items plus earlier 'notfound' misses that are due for another try.
+        let targets = (ArchiveStore.shared.mediaNeedingEnrichment() + ArchiveStore.shared.mediaNeedingNotFoundRetry())
             .filter { !skip.contains($0.mediaNumber) }
         // Books enriched before the author/year/… columns existed: fill them once, by ISBN.
         let backfill = ArchiveStore.shared.mediaNeedingDetailBackfill()
@@ -66,7 +67,7 @@ final class CatalogEnricher {
             try? await Task.sleep(nanoseconds: politeDelay)
         }
         // Parse guard: a changed Trefferliste markup would make EVERY search look empty, and
-        // 'notfound' is permanent — one VÖBB redesign would silently lock every pending item. So
+        // 'notfound' is (nearly) permanent — one VÖBB redesign would silently lock every pending item. So
         // the title pass only collects its misses; if a run with ≥ minSearchesForGuard real
         // answers found nothing at all, they stay unprocessed (retried next refresh) and we warn.
         var found = 0
@@ -119,19 +120,27 @@ final class CatalogEnricher {
 
     /// One item: fresh session → search → parse → cover → store. On a *network* failure we
     /// store nothing (retried next refresh); on a successful-but-empty search we record
-    /// 'notfound' so it is never re-crawled — unless `deferNotFound`, where the caller decides
-    /// (see the parse guard in `enrichMissing`).
+    /// 'notfound' (retried a few times later, see `mediaNeedingNotFoundRetry`) — unless
+    /// `deferNotFound`, where the caller decides (see the parse guard in `enrichMissing`).
+    /// A title search walks `titleSearchTerms` until one yields a hit.
     @discardableResult
     private func enrichOne(mediaNumber: String, term: String, source: String, deferNotFound: Bool = false) async -> Outcome {
         let cleanTerm = term.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTerm.isEmpty else { return .transient }
+        let terms = source == "title" ? Self.titleSearchTerms(cleanTerm) : [cleanTerm]
 
-        guard let ctx = try? await bootstrap(),
-              let resultHTML = try? await search(term: cleanTerm, ctx: ctx) else {
-            return .transient // network/session error → leave unprocessed for a later run
+        var found: (hit: HTMLParser.CatalogHit, term: String, html: String, ctx: Ctx)?
+        for t in terms {
+            guard let ctx = try? await bootstrap(),
+                  let resultHTML = try? await search(term: t, ctx: ctx) else {
+                return .transient // network/session error → leave unprocessed for a later run
+            }
+            if let hit = HTMLParser.parseCatalogResult(resultHTML) {
+                found = (hit, t, resultHTML, ctx)
+                break
+            }
         }
-
-        guard let hit = HTMLParser.parseCatalogResult(resultHTML) else {
+        guard let (hit, searchTerm, resultHTML, ctx) = found else {
             if !deferNotFound { recordNotFound(mediaNumber: mediaNumber, term: cleanTerm, source: source) }
             return .notFound
         }
@@ -139,7 +148,7 @@ final class CatalogEnricher {
         // Optional: open the Vollanzeige for blurb / subjects / author / year / …
         var detail = HTMLParser.CatalogDetail.empty
         if !hit.recordID.isEmpty,
-           let vollHTML = try? await openVollanzeige(recordID: hit.recordID, term: cleanTerm, trefferliste: resultHTML, ctx: ctx) {
+           let vollHTML = try? await openVollanzeige(recordID: hit.recordID, term: searchTerm, trefferliste: resultHTML, ctx: ctx) {
             detail = HTMLParser.parseVollanzeige(vollHTML)
         }
 
@@ -157,6 +166,31 @@ final class CatalogEnricher {
         ArchiveStore.shared.upsertMediaDetails(
             mediaNumber: mediaNumber, isbn: source == "manual" ? term.trimmingCharacters(in: .whitespacesAndNewlines) : "",
             coverPath: "", detail: .empty, source: source, status: "notfound", recordID: "")
+        if source == "title" { ArchiveStore.shared.bumpNotFoundAttempt(mediaNumber: mediaNumber) }
+    }
+
+    /// Search terms for a loan-list title, most specific first. The loan list carries the full
+    /// statement of responsibility ("Titel / Autor [Textdichter/in] ; …"), and VÖBB's free search
+    /// returns nothing as soon as it contains a letter its index folds differently — e.g. "Ḥ" in
+    /// "Sasha Ḥaddad", while the same string with "H" finds the record. So: the title as is, then
+    /// with non-Latin-1 diacritics folded, then just the title part before " / ".
+    static func titleSearchTerms(_ title: String) -> [String] {
+        let folded = foldRareDiacritics(title)
+        var terms = [title, folded]
+        if let slash = folded.range(of: " / ") {
+            terms.append(String(folded[..<slash.lowerBound]).trimmingCharacters(in: .whitespaces))
+        }
+        var seen = Set<String>()
+        return terms.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    /// Strips diacritics from letters outside Latin-1 ("Ḥ" → "H", "ł" stays), leaving German
+    /// umlauts, ß and common accents like "é" alone — those the catalog search handles fine.
+    static func foldRareDiacritics(_ s: String) -> String {
+        String(s.map { ch -> String in
+            guard ch.unicodeScalars.contains(where: { $0.value > 0xFF }) else { return String(ch) }
+            return String(ch).folding(options: .diacriticInsensitive, locale: nil)
+        }.joined())
     }
 
     /// At most one warning per day, like the loan page's parse monitor.
