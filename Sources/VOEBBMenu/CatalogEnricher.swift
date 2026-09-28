@@ -99,7 +99,7 @@ final class CatalogEnricher {
     /// few tries and a genuinely cover-less record isn't hammered every refresh.
     private func healMissingCovers(_ targets: [ArchiveStore.DetailTarget]) async {
         guard !targets.isEmpty else { return }
-        let session = makeSession()
+        let session = ADISHTTP.makeSession()
         for t in targets {
             let url = "\(base)/vlb/cover/\(t.isbn)/m"
             if let path = await downloadCover(url, mediaNumber: t.mediaNumber, session: session) {
@@ -207,7 +207,7 @@ final class CatalogEnricher {
         data["$Tab"] = "0"
 
         let body = data.map { "\(urlEncode($0.key))=\(urlEncode($0.value))" }.joined(separator: "&")
-        return try await postRaw(ctx.appURL, body: body, session: ctx.session, referer: ctx.appURL)
+        return try await ADISHTTP.postRaw(ctx.appURL, body: body, session: ctx.session, referer: ctx.appURL)
     }
 
     // MARK: - Catalog HTTP flow
@@ -220,8 +220,8 @@ final class CatalogEnricher {
 
     /// GET the start page (URLSession follows the redirect) → session-id URL + form hidden inputs.
     private func bootstrap() async throws -> Ctx {
-        let session = makeSession()
-        let html = try await get("\(base)/aDISWeb/app/prod00?sp=SPROD00", session: session, referer: "")
+        let session = ADISHTTP.makeSession()
+        let html = try await ADISHTTP.get("\(base)/aDISWeb/app/prod00?sp=SPROD00", session: session)
         guard let idMatch = html.range(of: #"/aDISWeb/_[a-z0-9]+/app"#, options: .regularExpression) else {
             throw VOEBBError.parseError("Katalog-Session nicht gefunden")
         }
@@ -247,7 +247,7 @@ final class CatalogEnricher {
         data["$Button"] = "pressed"
 
         let body = data.map { "\(urlEncode($0.key))=\(urlEncode($0.value))" }.joined(separator: "&")
-        return try await postRaw(ctx.appURL, body: body, session: ctx.session, referer: "\(base)/aDISWeb/app/prod00")
+        return try await ADISHTTP.postRaw(ctx.appURL, body: body, session: ctx.session, referer: "\(base)/aDISWeb/app/prod00")
     }
 
     /// Downloads the VLB cover (requires UA + aDIS Referer) into `covers/{media_number}.jpg`.
@@ -267,40 +267,7 @@ final class CatalogEnricher {
         do { try data.write(to: fileURL); return fileURL.path } catch { return nil }
     }
 
-    // MARK: - HTTP primitives (standalone; VÖBB catalog is anonymous)
-
-    private func makeSession() -> URLSession {
-        let config = URLSessionConfiguration.ephemeral
-        config.httpCookieAcceptPolicy = .always
-        config.httpShouldSetCookies = true
-        config.timeoutIntervalForRequest = 30
-        return URLSession(configuration: config)
-    }
-
-    private func get(_ url: String, session: URLSession, referer: String) async throws -> String {
-        var req = URLRequest(url: URL(string: url)!)
-        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("de-DE,de;q=0.9", forHTTPHeaderField: "Accept-Language")
-        req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
-        let (data, response) = try await session.data(for: req)
-        try VOEBBSession.checkHTTP(response)
-        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
-    }
-
-    private func postRaw(_ url: String, body: String, session: URLSession, referer: String) async throws -> String {
-        var req = URLRequest(url: URL(string: url)!)
-        req.httpMethod = "POST"
-        req.httpBody = body.data(using: .utf8)
-        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("de-DE,de;q=0.9", forHTTPHeaderField: "Accept-Language")
-        req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
-        let (data, response) = try await session.data(for: req)
-        try VOEBBSession.checkHTTP(response)
-        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
-    }
+    // HTTP primitives: `ADISHTTP` (shared with VOEBBSession; the VÖBB catalog is anonymous).
 
     // Shared with VOEBBSession via ADISForm.
     private func extractHiddenInputs(_ html: String) -> [String: String] { ADISForm.extractHiddenInputs(html) }

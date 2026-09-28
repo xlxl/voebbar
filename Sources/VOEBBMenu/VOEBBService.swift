@@ -22,11 +22,7 @@ final class VOEBBSession {
 
     init(account: LibraryAccount) {
         self.account = account
-        let config = URLSessionConfiguration.ephemeral
-        config.httpCookieAcceptPolicy = .always
-        config.httpShouldSetCookies = true
-        config.timeoutIntervalForRequest = 30
-        self.session = URLSession(configuration: config)
+        self.session = ADISHTTP.makeSession()
     }
 
     // MARK: - Public API
@@ -321,21 +317,7 @@ final class VOEBBSession {
     // MARK: - Private: HTTP
 
     private func get(url: String) async throws -> String {
-        var req = URLRequest(url: URL(string: url)!)
-        req.addValue(ADISForm.userAgent, forHTTPHeaderField: "User-Agent")
-        req.addValue("de-DE,de;q=0.9", forHTTPHeaderField: "Accept-Language")
-        req.addValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await session.data(for: req)
-        try Self.checkHTTP(response)
-        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
-    }
-
-    /// Error pages (5xx/4xx) would otherwise be silently "parsed" as empty results.
-    static func checkHTTP(_ response: URLResponse) throws {
-        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-            throw VOEBBError.networkError("HTTP \(http.statusCode)")
-        }
+        try await ADISHTTP.get(url, session: session)
     }
 
     private func post(url: String, data: [String: String], referer: String) async throws -> String {
@@ -344,20 +326,7 @@ final class VOEBBSession {
     }
 
     private func postRaw(url: String, body: String, referer: String) async throws -> String {
-        var req = URLRequest(url: URL(string: url)!)
-        req.httpMethod = "POST"
-        req.httpBody = body.data(using: .utf8)
-        req.addValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        req.addValue(ADISForm.userAgent, forHTTPHeaderField: "User-Agent")
-        req.addValue("de-DE,de;q=0.9", forHTTPHeaderField: "Accept-Language")
-        req.addValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        if !referer.isEmpty {
-            req.addValue(referer, forHTTPHeaderField: "Referer")
-        }
-
-        let (data, response) = try await session.data(for: req)
-        try Self.checkHTTP(response)
-        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+        try await ADISHTTP.postRaw(url, body: body, session: session, referer: referer)
     }
 
     // MARK: - Helpers (shared with CatalogEnricher via ADISForm)
