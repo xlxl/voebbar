@@ -1,22 +1,11 @@
 import Foundation
 
-/// Due-date thresholds shared by the menu emoji, the status badge and the overview's cell colours.
+/// Due-date thresholds shared by the menu dots, the status badge and the overview's colours (see `UrgencyStyle`).
 enum Urgency {
-    /// Fewer days left than this → red / 📕.
+    /// Fewer days left than this → red.
     static let urgentDays = 7
-    /// Up to this many days → orange / 📙.
+    /// Up to this many days → orange.
     static let soonDays = 14
-}
-
-/// VÖBB library names carry the district as a prefix ("Charlottenburg-Wilmersdorf: Adolf-
-/// Reichwein-Bibliothek"), which makes the actual branch name hard to read. The UI shows only
-/// the part after the last ":" everywhere (menus, tables, tooltips).
-enum LibraryName {
-    static func short(_ full: String) -> String {
-        guard let colon = full.lastIndex(of: ":") else { return full }
-        let name = full[full.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? full : name
-    }
 }
 
 struct LibraryAccount: Codable, Identifiable, Equatable {
@@ -81,13 +70,6 @@ struct Loan {
     var daysUntilDue: Int {
         let today = Calendar.current.startOfDay(for: Date())
         return max(0, Calendar.current.dateComponents([.day], from: today, to: dueDate).day ?? 0)
-    }
-
-    /// 📕 < 7 Tage  📙 7–14 Tage  📗 > 14 Tage
-    var bookEmoji: String {
-        if isOverdue || daysUntilDue < Urgency.urgentDays { return "📕" }
-        if daysUntilDue <= Urgency.soonDays { return "📙" }
-        return "📗"
     }
 }
 

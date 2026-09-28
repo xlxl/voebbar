@@ -506,121 +506,124 @@ final class StatusBarController: NSObject {
 
     // MARK: - Account Section
 
+    /// Compact per-account block: header (name + pickup code, click opens the overview), an
+    /// optional expiry warning, ONE summary line (dot · count · next due · fees only when due),
+    /// "Fällige verlängern" only when something is due, then the two submenus. "Alle verlängern"
+    /// lives at the top of "Ausgeliehene Medien" — rarely needed, so it doesn't cost a line here.
     private func addAccountSection(to menu: NSMenu, data: AccountData) {
-        // Konto-Überschrift (fett)
-        let headerItem = NSMenuItem(title: data.account.name, action: nil, keyEquivalent: "")
-        headerItem.isEnabled = false
-        headerItem.attributedTitle = NSAttributedString(
+        // Enabled on purpose (click → overview): disabled items would be dimmed by macOS.
+        let headerItem = NSMenuItem(title: data.account.name, action: #selector(onOverview), keyEquivalent: "")
+        headerItem.target = self
+        headerItem.toolTip = "Alle Ausleihen anzeigen"
+        let header = NSMutableAttributedString(
             string: data.account.name,
-            attributes: [.font: NSFont.boldSystemFont(ofSize: 13)]
+            attributes: [.font: NSFont.boldSystemFont(ofSize: 13), .foregroundColor: NSColor.labelColor]
         )
+        if let code = data.pickupCode {
+            header.append(NSAttributedString(
+                string: "   Abholcode \(code)",
+                attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor]
+            ))
+        }
+        headerItem.attributedTitle = header
         menu.addItem(headerItem)
 
         if let error = data.error {
-            add(to: menu, title: "  ⚠️  \(truncate(error, to: 50))", enabled: false)
+            let item = add(to: menu, title: "  ⚠  \(truncate(error, to: 50))", enabled: false)
+            item.toolTip = error
             return
         }
 
         // VÖBB's own card-expiry warning — shown exactly when the website shows it.
         if let warning = data.cardExpiryWarning {
-            let item = add(to: menu, title: "  ⚠️  \(warning)", enabled: false)
+            let item = add(to: menu, title: "", enabled: false)
             item.attributedTitle = NSAttributedString(
-                string: "  ⚠️  \(warning)",
+                string: "  ⚠  \(warning)",
                 attributes: [.foregroundColor: NSColor.systemOrange, .font: NSFont.menuFont(ofSize: 0)]
             )
         }
 
-        // Ausleihen-Zeile
+        // Summary line. Fees only appear when there is something to say (due or unknown).
+        var parts: [String] = []
         if data.loans.isEmpty {
-            add(to: menu, title: "  📗  Keine Ausleihen", enabled: false)
+            parts.append("Keine Ausleihen")
         } else {
-            let urgencyEmoji = urgencyBadge(for: data)
-            let loanItem = add(to: menu,
-                               title: "  \(urgencyEmoji)  \(data.loans.count) Ausleihe\(data.loans.count == 1 ? "" : "n")",
-                               enabled: false)
-            if let days = data.daysUntilNextDue {
-                loanItem.toolTip = "Nächste Rückgabe: \(data.nextDueDateString ?? "") (\(days) Tag\(days == 1 ? "" : "e"))"
-            }
-
-            if let nextDate = data.nextDueDateString {
-                add(to: menu, title: "  📅  Nächste Rückgabe: \(nextDate)", enabled: false)
+            parts.append("\(data.loans.count) Ausleihe\(data.loans.count == 1 ? "" : "n")")
+            if let next = data.loans.min(by: { $0.dueDate < $1.dueDate }) {
+                parts.append("nächste \(String(next.dueDateString.prefix(6)))")   // "09.10.2026" → "09.10."
             }
         }
-
-        // Gebühren
         if data.feesUnknown {
-            add(to: menu, title: "  💶  Gebühren unbekannt", enabled: false)
+            parts.append("Gebühren unbekannt")
         } else if data.fees > 0 {
-            add(to: menu, title: String(format: "  💶  %.2f € Gebühren", data.fees), enabled: false)
-        } else {
-            add(to: menu, title: "  ✅  Keine Gebühren", enabled: false)
+            parts.append(String(format: "%.2f € Gebühren", data.fees).replacingOccurrences(of: ".", with: ","))
+        }
+        let summaryItem = add(to: menu, title: "", enabled: false)
+        summaryItem.attributedTitle = UrgencyStyle.dotTitle(parts.joined(separator: " · "), color: data.urgencyColor)
+        var tip: [String] = []
+        if let next = data.loans.min(by: { $0.dueDate < $1.dueDate }) {
+            let days = next.daysUntilDue
+            tip.append(days < 0 ? "Überfällig seit \(next.dueDateString)"
+                                : "Nächste Rückgabe: \(next.dueDateString) (\(days) Tag\(days == 1 ? "" : "e"))")
+        }
+        if !data.feesUnknown && data.fees == 0 { tip.append("Keine Gebühren") }
+        if !data.cardValidUntil.isEmpty { tip.append("Ausweis gültig bis \(data.cardValidUntil)") }
+        summaryItem.toolTip = tip.joined(separator: "\n")
+
+        guard !data.loans.isEmpty else { return }
+
+        let days = AccountStorage.shared.renewalDueDays
+        if data.loans.contains(where: { $0.daysUntilDue <= days }) {
+            let dueItem = NSMenuItem(title: "  ↺  Fällige verlängern (≤ \(days) Tage)", action: #selector(onRenewDue(_:)), keyEquivalent: "")
+            dueItem.target = self
+            dueItem.representedObject = data.account.cardNumber
+            menu.addItem(dueItem)
         }
 
-        if let code = data.pickupCode {
-            let item = add(to: menu, title: "  🔑  Abholcode \(code)", enabled: false)
-            if !data.cardValidUntil.isEmpty { item.toolTip = "Ausweis gültig bis \(data.cardValidUntil)" }
-        }
-
-        // Verlängern-Buttons
-        if !data.loans.isEmpty {
-            let days = AccountStorage.shared.renewalDueDays
-            if data.loans.contains(where: { $0.daysUntilDue <= days }) {
-                let dueItem = NSMenuItem(title: "  ↺  Fällige verlängern (≤ \(days) Tage)", action: #selector(onRenewDue(_:)), keyEquivalent: "")
-                dueItem.target = self
-                dueItem.representedObject = data.account.cardNumber
-                menu.addItem(dueItem)
+        // Medienliste als Untermenü, "Alle verlängern" obenauf
+        let subItem = NSMenuItem(title: "      Ausgeliehene Medien", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        let renewItem = NSMenuItem(title: "↺  Alle verlängern", action: #selector(onRenew(_:)), keyEquivalent: "")
+        renewItem.target = self
+        renewItem.representedObject = data.account.cardNumber
+        submenu.addItem(renewItem)
+        submenu.addItem(.separator())
+        for loan in data.loans.sorted(by: { $0.dueDate < $1.dueDate }) {
+            let short = truncate(loan.title, to: Self.maxTitleLength)
+            let menuItem = NSMenuItem(title: short, action: nil, keyEquivalent: "")
+            menuItem.attributedTitle = UrgencyStyle.dotTitle(short, color: loan.urgencyColor, indent: "")
+            var itemTip = "\(loan.title)\nFällig: \(loan.dueDateString)\n\(LibraryName.short(loan.library))"
+            if loan.isRenewable == false {
+                let reason = RenewabilityRow.shorten(loan.renewalReason)
+                itemTip += "\nNicht verlängerbar\(reason.isEmpty ? "" : ": \(reason)")"
             }
-
-            let renewItem = NSMenuItem(title: "  ↺  Alle verlängern", action: #selector(onRenew(_:)), keyEquivalent: "")
-            renewItem.target = self
-            renewItem.representedObject = data.account.cardNumber
-            menu.addItem(renewItem)
+            menuItem.toolTip = itemTip
+            menuItem.isEnabled = false
+            submenu.addItem(menuItem)
         }
-
-        // Bücherlist als Untermenü
-        if !data.loans.isEmpty {
-            let subItem = NSMenuItem(title: "  📖  Ausgeliehene Medien", action: nil, keyEquivalent: "")
-            let submenu = NSMenu()
-            for loan in data.loans.sorted(by: { $0.dueDate < $1.dueDate }) {
-                let short = truncate(loan.title, to: Self.maxTitleLength)
-                let menuItem = NSMenuItem(title: "\(loan.bookEmoji)  \(short)", action: nil, keyEquivalent: "")
-                menuItem.toolTip = "\(loan.title)\n📅 Fällig: \(loan.dueDateString)\n🏛 \(LibraryName.short(loan.library))"
-                menuItem.isEnabled = false
-                submenu.addItem(menuItem)
-            }
-            subItem.submenu = submenu
-            menu.addItem(subItem)
-        }
+        subItem.submenu = submenu
+        menu.addItem(subItem)
 
         // Aufschlüsselung nach Bibliothek — damit man vor der Abgabe weiß, wie viele Medien
         // pro Standort herauszusuchen sind. Bezirks-Präfix weggekürzt (LibraryName.short).
-        if !data.loans.isEmpty {
-            let byLibrary = Dictionary(grouping: data.loans, by: { LibraryName.short($0.library) })
-                .map { (library: $0.key, count: $0.value.count) }
-                .sorted { $0.count != $1.count ? $0.count > $1.count : $0.library < $1.library }
+        let byLibrary = Dictionary(grouping: data.loans, by: { LibraryName.short($0.library) })
+            .map { (library: $0.key, count: $0.value.count) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.library < $1.library }
 
-            let libItem = NSMenuItem(title: "  📍  Nach Bibliothek", action: nil, keyEquivalent: "")
-            let libMenu = NSMenu()
-            for entry in byLibrary {
-                let name = entry.library.isEmpty ? "Unbekannte Bibliothek" : entry.library
-                let row = NSMenuItem(title: "\(name): \(entry.count)", action: nil, keyEquivalent: "")
-                row.isEnabled = false
-                libMenu.addItem(row)
-            }
-            libItem.submenu = libMenu
-            menu.addItem(libItem)
+        let libItem = NSMenuItem(title: "      Nach Bibliothek", action: nil, keyEquivalent: "")
+        let libMenu = NSMenu()
+        for entry in byLibrary {
+            let name = entry.library.isEmpty ? "Unbekannte Bibliothek" : entry.library
+            let row = NSMenuItem(title: "\(name): \(entry.count)", action: nil, keyEquivalent: "")
+            row.isEnabled = false
+            libMenu.addItem(row)
         }
+        libItem.submenu = libMenu
+        menu.addItem(libItem)
     }
 
     // MARK: - Helpers
-
-    /// Dringlichkeits-Emoji für eine Account-Zusammenfassung
-    private func urgencyBadge(for data: AccountData) -> String {
-        guard let days = data.daysUntilNextDue else { return "📗" }
-        if days < Urgency.urgentDays { return "📕" }
-        if days <= Urgency.soonDays { return "📙" }
-        return "📗"
-    }
 
     private func truncate(_ s: String, to length: Int) -> String {
         guard s.count > length else { return s }

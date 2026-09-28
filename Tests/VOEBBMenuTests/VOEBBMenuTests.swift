@@ -364,7 +364,7 @@ import Testing
 
 @Suite struct ModelTests {
     @Test func libraryShortName() {
-        #expect(LibraryName.short("Charlottenburg-Wilmersdorf: Adolf-Reichwein-Bibliothek") == "Adolf-Reichwein-Bibliothek")
+        #expect(LibraryName.short("Charlottenburg-Wilmersdorf: Adolf-Reichwein-Bibliothek") == "Adolf Reichwein")
         #expect(LibraryName.short("Ohne Bezirk") == "Ohne Bezirk")
     }
 
@@ -431,5 +431,19 @@ import Testing
         #expect(CatalogEnricher.titleSearchTerms("Räuber Ratte") == ["Räuber Ratte"])
         #expect(CatalogEnricher.titleSearchTerms("Wohin fließt das Badewasser? : mit Klappen / Katja Reider")
                 == ["Wohin fließt das Badewasser? : mit Klappen / Katja Reider", "Wohin fließt das Badewasser? : mit Klappen"])
+    }
+}
+
+// MARK: - Library short names
+
+@Suite struct LibraryNameTests {
+    @Test func tableAndAmbiguity() {
+        #expect(LibraryName.short("Lichtenberg: Egon-Erwin-Kisch-Bibliothek") == "Egon Erwin Kisch")
+        #expect(LibraryName.short("Pankow: Kurt-Tucholsky-Bibliothek") == "Kurt Tucholsky · Pankow")
+        #expect(LibraryName.short("Mitte: Kurt-Tucholsky-Bibliothek") == "Kurt Tucholsky · Mitte")
+    }
+
+    @Test func fallbackForUnknownNames() {
+        #expect(LibraryName.short("Steglitz-Zehlendorf: Stadtteilbibliothek Neuerfunden") == "Neuerfunden")
     }
 }

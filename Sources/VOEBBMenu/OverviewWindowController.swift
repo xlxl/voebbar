@@ -43,8 +43,11 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
     private func buildWindowIfNeeded() {
         guard window == nil else { return }
 
+        // Wide enough that the renewal reason and the library are readable without resizing;
+        // clamped to the screen. After that the user's own size/position wins (autosave).
+        let visible = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1280, height: 800)
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 480),
+            contentRect: NSRect(x: 0, y: 0, width: min(1080, visible.width - 40), height: min(600, visible.height - 40)),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -54,6 +57,7 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         win.delegate = self
         win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 500, height: 300)
+        win.setFrameAutosaveName("VOEBBOverviewWindow")
 
         let cv = NSView()
         cv.translatesAutoresizingMaskIntoConstraints = false
@@ -122,13 +126,13 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         table.menu = rowMenu
 
         let cols: [(id: String, title: String, width: CGFloat, minWidth: CGFloat)] = [
-            ("emoji",   "",              30,  30),
-            ("title",   "Titel",         240, 100),
-            ("account", "Konto",         100, 80),
-            ("due",     "Fällig am",     90,  80),
-            ("days",    "Tage",          60,  50),
-            ("renew",   "Verlängerbar",  160, 90),
-            ("library", "Bibliothek",    130, 80),
+            ("emoji",   "",              24,  24),
+            ("title",   "Titel",         300, 100),
+            ("account", "Konto",         70,  50),
+            ("due",     "Fällig am",     85,  80),
+            ("days",    "Tage",          45,  40),
+            ("renew",   "Verlängerbar",  270, 90),
+            ("library", "Bibliothek",    200, 80),
         ]
         for col in cols {
             let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(col.id))
@@ -144,6 +148,9 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
             table.addTableColumn(c)
         }
 
+        // Remember column widths/order the user sets (initial widths above apply only once).
+        table.autosaveName = "VOEBBOverviewTable"
+        table.autosaveTableColumns = true
         table.delegate = self
         table.dataSource = self
         scrollView.documentView = table
@@ -182,7 +189,7 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         let urgent = allLoans.filter { $0.loan.daysUntilDue < Urgency.urgentDays }.count
         var parts = ["\(total) Ausleihe\(total == 1 ? "" : "n")"]
         if urgent > 0 {
-            parts.append("📕 \(urgent) bald fällig")
+            parts.append("\(urgent) bald fällig")
         }
         label.stringValue = parts.joined(separator: "  ·  ")
     }
@@ -293,7 +300,8 @@ extension OverviewWindowController: NSTableViewDelegate {
 
         switch tableColumn?.identifier.rawValue {
         case "emoji":
-            cell.stringValue = loan.bookEmoji
+            cell.stringValue = "●"
+            cell.textColor = loan.urgencyColor
             cell.alignment = .center
 
         case "title":
@@ -338,6 +346,7 @@ extension OverviewWindowController: NSTableViewDelegate {
 
         case "library":
             cell.stringValue = LibraryName.short(loan.library)
+            cell.toolTip = loan.library
 
         default: break
         }
