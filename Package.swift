@@ -12,5 +12,10 @@ let package = Package(
                 .linkedLibrary("sqlite3"),
             ]
         ),
+        .testTarget(
+            name: "VOEBBMenuTests",
+            dependencies: ["VOEBBMenu"],
+            path: "Tests/VOEBBMenuTests"
+        ),
     ]
 )

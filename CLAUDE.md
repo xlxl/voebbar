@@ -17,7 +17,7 @@ DEPLOY=0 ./build_app.sh     # build only, leave VOEBBMenu.app in the repo
 
 It then signs with the self-signed identity **`VOEBBMenu Dev`** (override via `SIGN_IDENTITY`; falls back to ad-hoc with a warning) and — unless `DEPLOY=0` — quits the running instance, moves the bundle to `/Applications/VOEBBMenu.app` (`DEPLOY_DIR`), verifies the signature there, **deletes the repo copy**, and launches the deployed app. Both halves matter for the Keychain: the stored VÖBB passwords / Tonies token live in the legacy (ACL-based) Keychain, whose grant is bound to the trusted app's signature **and launch path**. A stable identity keeps rebuilds silent only as long as the app always starts from the same path — launching the repo-local bundle counts as a different app and re-prompts, which is why the repo copy is removed. Detecting the identity uses `security find-identity -p codesigning` *without* `-v`: a self-signed cert is `CSSMERR_TP_NOT_TRUSTED` and would be filtered out by `-v`.
 
-`swift test` currently fails with "no tests found" — `Tests/VOEBBMenuTests` exists (Swift Testing framework, one empty stub) but `Package.swift` only declares the executable target, no test target. If you add real tests, wire up a `testTarget` in `Package.swift` first.
+`swift test` runs `Tests/VOEBBMenuTests` (Swift Testing, `@testable import VOEBBMenu`): pure-function tests for the HTML parsers, `ADISForm` helpers and the Tonie title match, on small hand-written fixtures in the live markup's shape. Never put real account data or scraped pages in fixtures. When a parser or the Tonie match changes because VÖBB/tonies.com changed, add the failing real-world case as a test first.
 
 No linter/formatter is configured.
 

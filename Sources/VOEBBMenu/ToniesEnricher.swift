@@ -60,7 +60,7 @@ final class ToniesEnricher {
         var unmatched: [ArchiveStore.EnrichTarget] = []
         for target in targets {
             defer { EnrichmentProgress.shared.step() }
-            guard let match = bestMatch(for: target.title, in: tonies),
+            guard let match = Self.bestMatch(for: target.title, in: tonies),
                   let path = await downloadImage(match.imageUrl, mediaNumber: target.mediaNumber) else {
                 unmatched.append(target)
                 continue
@@ -162,7 +162,7 @@ final class ToniesEnricher {
     // MARK: - Matching
 
     /// Best-scoring Tonie whose tokens are sufficiently covered by the VÖBB title, or nil.
-    private func bestMatch(for voebbTitle: String, in tonies: [Tonie]) -> Tonie? {
+    static func bestMatch(for voebbTitle: String, in tonies: [Tonie]) -> Tonie? {
         let haystack = Self.tokens(voebbTitle)
         guard !haystack.isEmpty else { return nil }
 
