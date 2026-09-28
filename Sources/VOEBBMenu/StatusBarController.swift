@@ -1,5 +1,10 @@
 import AppKit
 
+/// Lives on the main thread: the status item, the menu and the `isLoading`/`isEnriching`/`isRenewing`
+/// flags are only touched there, which `@MainActor` now has the compiler check. The one piece of
+/// real background work — scraping + archive write + enrichment in `refresh()` — runs in a detached
+/// task and hops back via `MainActor.run`.
+@MainActor
 final class StatusBarController: NSObject {
     private var statusItem: NSStatusItem
     private var refreshTimer: Timer?
@@ -51,8 +56,9 @@ final class StatusBarController: NSObject {
     private func scheduleTimer() {
         refreshTimer?.invalidate()
         let interval = AccountStorage.shared.refreshIntervalHours * 3600
+        // A scheduled timer fires on the run loop it was added to — the main one here.
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.refresh()
+            MainActor.assumeIsolated { self?.refresh() }
         }
         timer.tolerance = interval * 0.05
         refreshTimer = timer
@@ -79,7 +85,9 @@ final class StatusBarController: NSObject {
             ($0.account.cardNumber, $0.loans.count)
         })
 
-        Task {
+        // Detached: the scraping, the synchronous SQLite write and the enrichment crawl must not
+        // run on the main actor (a plain `Task` here would inherit it).
+        Task.detached {
             var results: [AccountData] = []
             for account in accounts {
                 guard let password = AccountStorage.shared.password(for: account) else {

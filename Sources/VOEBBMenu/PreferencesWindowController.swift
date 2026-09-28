@@ -1,5 +1,6 @@
 import AppKit
 
+@MainActor
 final class PreferencesWindowController: NSObject, NSWindowDelegate {
     static let shared = PreferencesWindowController()
 

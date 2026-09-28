@@ -1,5 +1,6 @@
 import AppKit
 
+@MainActor
 final class OverviewWindowController: NSObject, NSWindowDelegate {
     static let shared = OverviewWindowController()
 
