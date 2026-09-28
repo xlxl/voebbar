@@ -244,7 +244,7 @@ final class ArchiveStore {
         bind(stmt, 7, loan.library)
         bind(stmt, 8, now)
         bind(stmt, 9, now)
-        bind(stmt, 10, Self.isoDate(loan.dueDate))
+        bind(stmt, 10, Self.isoDay(fromGerman: loan.dueDateString))
         sqlite3_step(stmt)
     }
 
@@ -262,7 +262,7 @@ final class ArchiveStore {
         """
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         bind(stmt, 1, now)
-        bind(stmt, 2, Self.isoDate(loan.dueDate))
+        bind(stmt, 2, Self.isoDay(fromGerman: loan.dueDateString))
         bind(stmt, 3, loan.title)
         bind(stmt, 4, loan.signature)
         bind(stmt, 5, loan.mediaType)
@@ -676,18 +676,9 @@ final class ArchiveStore {
 
     private static func iso8601(_ date: Date) -> String { iso8601Formatter.string(from: date) }
 
-    private static let dateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
-
-    private static func isoDate(_ date: Date) -> String { dateFormatter.string(from: date) }
-
     /// "19.09.2026" → "2026-09-19" by plain string surgery (no Date round-trip, so no timezone
-    /// shift); '' for anything else.
+    /// shift); '' for anything else. Used for `due_date` and `ready_until`: formatting the parsed
+    /// local-midnight Date in UTC used to store every due date one day early (fixed 2026-09-28).
     static func isoDay(fromGerman s: String) -> String {
         let parts = s.split(separator: ".").map(String.init)
         guard parts.count == 3, let d = Int(parts[0]), let m = Int(parts[1]), let y = Int(parts[2]),
