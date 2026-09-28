@@ -65,10 +65,25 @@ final class CatalogEnricher {
             EnrichmentProgress.shared.step()
             try? await Task.sleep(nanoseconds: politeDelay)
         }
+        // Parse guard: a changed Trefferliste markup would make EVERY search look empty, and
+        // 'notfound' is permanent — one VÖBB redesign would silently lock every pending item. So
+        // the title pass only collects its misses; if a run with ≥ minSearchesForGuard real
+        // answers found nothing at all, they stay unprocessed (retried next refresh) and we warn.
+        var found = 0
+        var misses: [(mediaNumber: String, term: String)] = []
         for t in targets {
-            await enrichOne(mediaNumber: t.mediaNumber, term: t.title, source: "title")
+            switch await enrichOne(mediaNumber: t.mediaNumber, term: t.title, source: "title", deferNotFound: true) {
+            case .found: found += 1
+            case .notFound: misses.append((t.mediaNumber, t.title))
+            case .transient: break
+            }
             EnrichmentProgress.shared.step()
             try? await Task.sleep(nanoseconds: politeDelay)
+        }
+        if found == 0 && misses.count >= Self.minSearchesForGuard {
+            notifyCatalogParseSuspect(misses: misses.count)
+        } else {
+            for m in misses { recordNotFound(mediaNumber: m.mediaNumber, term: m.term, source: "title") }
         }
         for b in backfill {
             await backfillOne(mediaNumber: b.mediaNumber, isbn: b.isbn)
@@ -97,26 +112,28 @@ final class CatalogEnricher {
         }
     }
 
+    private static let minSearchesForGuard = 3
+    private let catalogParseNotifiedKey = "voebb_catalog_parsefail_notified"
+
+    enum Outcome { case found, notFound, transient }
+
     /// One item: fresh session → search → parse → cover → store. On a *network* failure we
     /// store nothing (retried next refresh); on a successful-but-empty search we record
-    /// 'notfound' so it is never re-crawled.
-    private func enrichOne(mediaNumber: String, term: String, source: String) async {
+    /// 'notfound' so it is never re-crawled — unless `deferNotFound`, where the caller decides
+    /// (see the parse guard in `enrichMissing`).
+    @discardableResult
+    private func enrichOne(mediaNumber: String, term: String, source: String, deferNotFound: Bool = false) async -> Outcome {
         let cleanTerm = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanTerm.isEmpty else { return }
+        guard !cleanTerm.isEmpty else { return .transient }
 
         guard let ctx = try? await bootstrap(),
               let resultHTML = try? await search(term: cleanTerm, ctx: ctx) else {
-            return // network/session error → leave unprocessed for a later run
+            return .transient // network/session error → leave unprocessed for a later run
         }
 
         guard let hit = HTMLParser.parseCatalogResult(resultHTML) else {
-            // For manual corrections the search term IS the ISBN: store it even on notfound, so
-            // pendingISBNOverrides (`d.isbn <> o.isbn`) sees the override as applied instead of
-            // re-crawling the same dead ISBN on every refresh.
-            ArchiveStore.shared.upsertMediaDetails(
-                mediaNumber: mediaNumber, isbn: source == "manual" ? cleanTerm : "", coverPath: "",
-                detail: .empty, source: source, status: "notfound", recordID: "")
-            return
+            if !deferNotFound { recordNotFound(mediaNumber: mediaNumber, term: cleanTerm, source: source) }
+            return .notFound
         }
 
         // Optional: open the Vollanzeige for blurb / subjects / author / year / …
@@ -130,6 +147,27 @@ final class CatalogEnricher {
         ArchiveStore.shared.upsertMediaDetails(
             mediaNumber: mediaNumber, isbn: hit.isbn, coverPath: coverPath,
             detail: detail, source: source, status: "found", recordID: hit.recordID)
+        return .found
+    }
+
+    private func recordNotFound(mediaNumber: String, term: String, source: String) {
+        // For manual corrections the search term IS the ISBN: store it even on notfound, so
+        // pendingISBNOverrides (`d.isbn <> o.isbn`) sees the override as applied instead of
+        // re-crawling the same dead ISBN on every refresh.
+        ArchiveStore.shared.upsertMediaDetails(
+            mediaNumber: mediaNumber, isbn: source == "manual" ? term.trimmingCharacters(in: .whitespacesAndNewlines) : "",
+            coverPath: "", detail: .empty, source: source, status: "notfound", recordID: "")
+    }
+
+    /// At most one warning per day, like the loan page's parse monitor.
+    private func notifyCatalogParseSuspect(misses: Int) {
+        let day = String(ISO8601DateFormatter().string(from: Date()).prefix(10))
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: catalogParseNotifiedKey) != day else { return }
+        defaults.set(day, forKey: catalogParseNotifiedKey)
+        NotificationManager.shared.notify(
+            title: "⚠️ VÖBB-Katalogsuche defekt?",
+            body: "\(misses) Titelsuchen ohne einen einzigen Treffer (Markup geändert?). Die Medien bleiben unverarbeitet und werden beim nächsten Abruf erneut versucht.")
     }
 
     /// Re-opens the Vollanzeige of an already-enriched item (by its unambiguous ISBN — for a Tonie,
