@@ -9,12 +9,12 @@ enum HTMLParser {
         let servicesHTML = extractKontoServices(html) ?? html
 
         if servicesHTML.contains("Keine Ausleihen") { return 0 }
-        if let m = servicesHTML.range(of: #"(\d+)\s+Ausleihen"#, options: .regularExpression),
-           let numStr = String(servicesHTML[m]).split(separator: " ").first,
-           let n = Int(numStr) {
-            return n
-        }
-        return nil
+        // Read the capture group, not a split on " " — the whitespace may be a newline, tab or
+        // decoded &nbsp;, and a failed parse here disarms the parse monitor's strongest check.
+        let regex = try! NSRegularExpression(pattern: #"(\d+)\s+Ausleihen"#)
+        guard let m = regex.firstMatch(in: servicesHTML, range: NSRange(servicesHTML.startIndex..., in: servicesHTML)),
+              let r = Range(m.range(at: 1), in: servicesHTML) else { return nil }
+        return Int(servicesHTML[r])
     }
 
     private static func extractKontoServices(_ html: String) -> String? {

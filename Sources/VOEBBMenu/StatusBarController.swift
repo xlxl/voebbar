@@ -525,9 +525,7 @@ final class StatusBarController: NSObject {
             }
 
             if let nextDate = data.nextDueDateString {
-                let days = data.daysUntilNextDue ?? 0
-                let icon = days < 7 ? "📅" : "📅"
-                add(to: menu, title: "  \(icon)  Nächste Rückgabe: \(nextDate)", enabled: false)
+                add(to: menu, title: "  📅  Nächste Rückgabe: \(nextDate)", enabled: false)
             }
         }
 

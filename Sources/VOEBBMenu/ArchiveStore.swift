@@ -297,7 +297,7 @@ final class ArchiveStore {
             \(overrideJoin)
             WHERE b.media_number <> ''
               AND (b.media_type = 'Tonie' OR b.media_type LIKE '%Hörbuch%' OR b.media_type LIKE '%CD%'\(overrideMatch))
-              AND NOT (d.source = 'tonie' AND d.cover_path <> '')
+              AND (d.media_number IS NULL OR d.source <> 'tonie' OR d.cover_path = '')
             GROUP BY b.media_number;
             """
             var out: [EnrichTarget] = []

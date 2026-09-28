@@ -28,16 +28,21 @@ final class EnrichmentProgress {
 
     private var startedAt: Date?
     private var runActive = false
+    /// Items of the earlier phases of this refresh cycle (catalog, Tonie collection, Tonie shop):
+    /// each `start` resets `done`, but "N neu angereichert" should cover the whole cycle.
+    private var cycleDone = 0
     private var generation = 0
 
     func start(phase: String, total: Int) {
         DispatchQueue.main.async {
             self.generation += 1
+            // A cycle starts with the first `start` after a `stop` (runActive false then).
+            self.cycleDone = self.runActive ? self.cycleDone + self.done : 0
             self.phase = phase
             self.total = total
             self.done = 0
             self.active = total > 0
-            self.runActive = total > 0
+            self.runActive = self.runActive || total > 0
             self.startedAt = Date()
             self.onChange?()
         }
@@ -59,16 +64,18 @@ final class EnrichmentProgress {
                 return
             }
             self.runActive = false
-            if self.done > 0 {
-                self.lastRunCount = self.done
+            let cycleTotal = self.cycleDone + self.done
+            self.cycleDone = 0
+            if cycleTotal > 0 {
+                self.lastRunCount = cycleTotal
                 self.lastRunAt = Date()
             }
 
             let gen = self.generation
             let elapsed = self.startedAt.map { Date().timeIntervalSince($0) } ?? self.minVisible
             let remaining = max(0, self.minVisible - elapsed)
-            let deactivate = { [weak self] in
-                guard let self, gen == self.generation else { return } // a newer run took over
+            let deactivate = {   // strong capture is fine: a process-lifetime singleton
+                guard gen == self.generation else { return } // a newer run took over
                 self.active = false
                 self.onChange?()
             }
