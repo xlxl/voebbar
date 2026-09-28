@@ -2,16 +2,22 @@ import Foundation
 import Security
 
 enum KeychainHelper {
+    /// Updates the existing item in place and only adds one when there is none. Delete + Add would
+    /// create a fresh item each time and drop its "Immer erlauben" ACL — for the Tonies refresh
+    /// token, which rotates on every enrichment run, that is every refresh.
     static func save(password: String, for cardNumber: String) {
         let data = password.data(using: .utf8)!
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: cardNumber,
             kSecAttrService as String: "de.voebb.menubar",
-            kSecValueData as String: data,
         ]
-        SecItemDelete(query as CFDictionary)
-        SecItemAdd(query as CFDictionary, nil)
+        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = query
+            add[kSecValueData as String] = data
+            SecItemAdd(add as CFDictionary, nil)
+        }
     }
 
     static func load(for cardNumber: String) -> String? {

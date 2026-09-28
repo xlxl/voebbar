@@ -313,8 +313,11 @@ enum HTMLParser {
     /// an optional leading media-type tag "[…]", the title, a shelf signature,
     /// and a trailing 9+ digit media number (barcode). Any part may be absent.
     static func parseTitleColumn(_ raw: String) -> (title: String, signature: String, mediaNumber: String, typeTag: String) {
+        // Any <br> spelling (`<br/>`, `<BR />` …), like `vollFieldAll` — a literal split would fuse
+        // title, signature and barcode into one part and lose the item's archive identity.
         var parts = raw
-            .components(separatedBy: "<br>")
+            .replacingOccurrences(of: #"(?i)<br\s*/?>"#, with: "\u{1}", options: .regularExpression)
+            .components(separatedBy: "\u{1}")
             .map { stripHTML($0).trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "¬", with: "") }
             .filter { !$0.isEmpty }
 

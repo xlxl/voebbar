@@ -99,7 +99,7 @@ final class ArchiveStore {
         );
         """)
         // Lightweight upgrade for DBs created before these columns existed. ALTER errors
-        // ("duplicate column") are ignored by exec() on a fresh DB that already has them.
+        // ("duplicate column") are ignored on a fresh DB that already has them.
         for col in ["author TEXT NOT NULL DEFAULT ''",
                     "published TEXT NOT NULL DEFAULT ''",
                     "series TEXT NOT NULL DEFAULT ''",
@@ -107,7 +107,7 @@ final class ArchiveStore {
                     "detail_version INTEGER NOT NULL DEFAULT 0",
                     "record_id TEXT NOT NULL DEFAULT ''",
                     "cover_attempts INTEGER NOT NULL DEFAULT 0"] {
-            exec("ALTER TABLE media_details ADD COLUMN \(col);")
+            exec("ALTER TABLE media_details ADD COLUMN \(col);", ignoringErrors: true)
         }
         // Manual ISBN corrections. The archive app WRITES these; voebbar reads them and
         // re-fetches the record by ISBN (unambiguous). Small shared contract, reverse direction.
@@ -118,6 +118,8 @@ final class ArchiveStore {
             created_at   TEXT NOT NULL DEFAULT ''
         );
         """)
+        // Schema marker for external tools only — neither voebbar nor Fundus reads it (checked
+        // 2026-09). Kept because the DB is shared; bump it with schema changes.
         exec("PRAGMA user_version=4;")
     }
 
@@ -183,12 +185,23 @@ final class ArchiveStore {
     private func update(id: Int64, loan: Loan, now: String) {
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
-        let sql = "UPDATE borrow_events SET last_seen=?, due_date=?, title=? WHERE id=?;"
+        // signature/media_type/library follow the page too (media_type feeds the Tonie gate), but an
+        // empty parse never blanks a value we already have.
+        let sql = """
+        UPDATE borrow_events SET last_seen=?, due_date=?, title=?,
+            signature=COALESCE(NULLIF(?, ''), signature),
+            media_type=COALESCE(NULLIF(?, ''), media_type),
+            library=COALESCE(NULLIF(?, ''), library)
+        WHERE id=?;
+        """
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         bind(stmt, 1, now)
         bind(stmt, 2, Self.isoDate(loan.dueDate))
         bind(stmt, 3, loan.title)
-        sqlite3_bind_int64(stmt, 4, id)
+        bind(stmt, 4, loan.signature)
+        bind(stmt, 5, loan.mediaType)
+        bind(stmt, 6, loan.library)
+        sqlite3_bind_int64(stmt, 7, id)
         sqlite3_step(stmt)
     }
 
@@ -202,7 +215,7 @@ final class ArchiveStore {
             bind(stmt, 1, card)
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let id = sqlite3_column_int64(stmt, 0)
-                let key = String(cString: sqlite3_column_text(stmt, 1))
+                let key = col(stmt, 1)
                 if !seenKeys.contains(key) { toClose.append(id) }
             }
         }
@@ -536,8 +549,11 @@ final class ArchiveStore {
 
     // MARK: - Helpers
 
-    private func exec(_ sql: String) {
-        sqlite3_exec(db, sql, nil, nil, nil)
+    /// Logs failures (full disk, corrupt DB …) so they don't vanish silently. `ignoringErrors` is
+    /// only for the column upgrades, where "duplicate column" is the expected outcome.
+    private func exec(_ sql: String, ignoringErrors: Bool = false) {
+        guard sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK, !ignoringErrors else { return }
+        NSLog("voebbar archive: SQL failed (%@): %@", String(sql.prefix(80)), String(cString: sqlite3_errmsg(db)))
     }
 
     private func bind(_ stmt: OpaquePointer?, _ index: Int32, _ value: String) {

@@ -374,7 +374,8 @@ final class StatusBarController: NSObject {
             .flatMap(\.loans)
             .filter { $0.isOverdue || $0.daysUntilDue <= threshold }
             .sorted { $0.dueDate < $1.dueDate }
-        let keys = Set(due.map { "\($0.mediaNumber)|\($0.dueDateString)" })
+        // renewalKey, not mediaNumber: items without a barcode would all share "|<date>".
+        let keys = Set(due.map { "\($0.renewalKey)|\($0.dueDateString)" })
 
         let defaults = UserDefaults.standard
         let previous = Set(defaults.stringArray(forKey: Self.notifiedKey) ?? [])
