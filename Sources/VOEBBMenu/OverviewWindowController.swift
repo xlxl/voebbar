@@ -178,7 +178,7 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
             label.stringValue = "Keine Ausleihen"
             return
         }
-        let urgent = allLoans.filter { $0.loan.daysUntilDue < 7 }.count
+        let urgent = allLoans.filter { $0.loan.daysUntilDue < Urgency.urgentDays }.count
         var parts = ["\(total) Ausleihe\(total == 1 ? "" : "n")"]
         if urgent > 0 {
             parts.append("📕 \(urgent) bald fällig")
@@ -234,8 +234,6 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         guard !rows.isEmpty else { return }
         statusBar?.renewSelected(rows.map { allLoans[$0] }, anchor: window)
     }
-
-    func windowWillClose(_ notification: Notification) {}
 
     // MARK: - Helper
 
@@ -306,9 +304,9 @@ extension OverviewWindowController: NSTableViewDelegate {
 
         case "due":
             cell.stringValue = loan.dueDateString
-            if loan.daysUntilDue < 7 {
+            if loan.daysUntilDue < Urgency.urgentDays {
                 cell.textColor = .systemRed
-            } else if loan.daysUntilDue <= 14 {
+            } else if loan.daysUntilDue <= Urgency.soonDays {
                 cell.textColor = .systemOrange
             }
 
@@ -319,7 +317,7 @@ extension OverviewWindowController: NSTableViewDelegate {
                 cell.textColor = .systemRed
             } else {
                 cell.stringValue = "\(days)d"
-                cell.textColor = days < 7 ? .systemRed : days <= 14 ? .systemOrange : .secondaryLabelColor
+                cell.textColor = days < Urgency.urgentDays ? .systemRed : days <= Urgency.soonDays ? .systemOrange : .secondaryLabelColor
             }
 
         case "renew":

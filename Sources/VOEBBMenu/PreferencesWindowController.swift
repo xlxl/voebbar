@@ -302,7 +302,6 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
         sheet.contentView = cv
 
-        // Use blocks via closures for button actions
         cancelBtn.target = self
         cancelBtn.action = #selector(dismissSheet)
         saveBtn.target = self

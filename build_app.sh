@@ -85,7 +85,7 @@ PLIST
 # codesign happily signs with it locally and only a *stable* identity matters for the Keychain.
 SIGN_IDENTITY="${SIGN_IDENTITY:-VOEBBMenu Dev}"
 if security find-identity -p codesigning 2>/dev/null | grep -q "\"$SIGN_IDENTITY\""; then
-    codesign --force --deep -s "$SIGN_IDENTITY" "$APP_DIR"
+    codesign --force -s "$SIGN_IDENTITY" "$APP_DIR"
     echo "Signed with identity: $SIGN_IDENTITY"
 else
     echo "No signing identity '$SIGN_IDENTITY' found — leaving ad-hoc signature (Keychain will re-prompt after deploys)."

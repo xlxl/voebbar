@@ -87,7 +87,7 @@ enum HTMLParser {
             checkboxValue: cbValue,
             mediaNumber: parsedTitle.mediaNumber,
             signature: parsedTitle.signature,
-            mediaType: Loan.mediaType(typeTag: parsedTitle.typeTag, signature: parsedTitle.signature)
+            mediaType: Loan.inferMediaType(typeTag: parsedTitle.typeTag, signature: parsedTitle.signature)
         )
     }
 

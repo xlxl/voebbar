@@ -282,9 +282,7 @@ final class VOEBBSession {
             throw VOEBBError.loginFailed("Ausweisnummer oder Passwort falsch")
         }
 
-        // Extract new session ID from current URL (stored in response header tracking)
-        // Parse from the HTML's form action or JS
-        // Extract session ID: look in form action or JS timeout URL
+        // Session-ID nach Login: aus der Form-Action, sonst aus der JS-Timeout-URL.
         let sessionSources = [
             (#"/aDISWeb/(_[a-z0-9]+)/app"#, #"_[a-z0-9]+"#),
             (#"/_[a-z0-9]+/timeout"#, #"_[a-z0-9]+"#),

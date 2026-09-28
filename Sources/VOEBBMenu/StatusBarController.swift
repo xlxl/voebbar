@@ -309,7 +309,7 @@ final class StatusBarController: NSObject {
 
         let totalLoans = currentData.reduce(0) { $0 + $1.loans.count }
         let minDays    = currentData.compactMap(\.daysUntilNextDue).min()
-        let hasUrgent  = minDays.map { $0 < 7 } ?? false
+        let hasUrgent  = minDays.map { $0 < Urgency.urgentDays } ?? false
         let hasError   = currentData.contains { $0.error != nil }
 
         // Icon: Bücherstapel; bei Dringlichkeit gefüllt
@@ -325,7 +325,7 @@ final class StatusBarController: NSObject {
         }
 
         // Tooltip mit kompaktem Status
-        if let days = minDays, days < 7 {
+        if let days = minDays, days < Urgency.urgentDays {
             button.toolTip = "⚠️ Nächste Rückgabe in \(days) Tag\(days == 1 ? "" : "en")"
         } else {
             button.toolTip = "VÖBB Bibliotheksausleihen"
@@ -593,8 +593,8 @@ final class StatusBarController: NSObject {
     /// Dringlichkeits-Emoji für eine Account-Zusammenfassung
     private func urgencyBadge(for data: AccountData) -> String {
         guard let days = data.daysUntilNextDue else { return "📗" }
-        if days < 7  { return "📕" }
-        if days <= 14 { return "📙" }
+        if days < Urgency.urgentDays { return "📕" }
+        if days <= Urgency.soonDays { return "📙" }
         return "📗"
     }
 

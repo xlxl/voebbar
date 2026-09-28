@@ -1,5 +1,13 @@
 import Foundation
 
+/// Due-date thresholds shared by the menu emoji, the status badge and the overview's cell colours.
+enum Urgency {
+    /// Fewer days left than this → red / 📕.
+    static let urgentDays = 7
+    /// Up to this many days → orange / 📙.
+    static let soonDays = 14
+}
+
 /// VÖBB library names carry the district as a prefix ("Charlottenburg-Wilmersdorf: Adolf-
 /// Reichwein-Bibliothek"), which makes the actual branch name hard to read. The UI shows only
 /// the part after the last ":" everywhere (menus, tables, tooltips).
@@ -50,7 +58,7 @@ struct Loan {
 
     /// Best-effort media category. Heuristic: driven by the leading "[…]" type tag and the
     /// shelf signature prefix; defaults to "Buch". Not authoritative — VÖBB has no clean field.
-    static func mediaType(typeTag: String, signature: String) -> String {
+    static func inferMediaType(typeTag: String, signature: String) -> String {
         let hay = (typeTag + " " + signature).lowercased()
         if hay.contains("tonie") { return "Tonie" }
         if hay.contains("blu-ray") || hay.contains("dvd") || hay.contains("video") { return "DVD/Video" }
@@ -77,8 +85,8 @@ struct Loan {
 
     /// 📕 < 7 Tage  📙 7–14 Tage  📗 > 14 Tage
     var bookEmoji: String {
-        if isOverdue || daysUntilDue < 7 { return "📕" }
-        if daysUntilDue <= 14           { return "📙" }
+        if isOverdue || daysUntilDue < Urgency.urgentDays { return "📕" }
+        if daysUntilDue <= Urgency.soonDays { return "📙" }
         return "📗"
     }
 }
