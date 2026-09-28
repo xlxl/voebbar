@@ -102,22 +102,234 @@ import Testing
     }
 }
 
-// MARK: - Fees
+// MARK: - Account info (overview <dt>/<dd>)
 
-@Suite struct FeesTests {
-    @Test func dueFeesAndCardValidity() {
-        let r = HTMLParser.parseFees("Fällige Gebühren 1,50 … Ausweis gültig bis 5.7.2027<br>")
-        #expect(r.fees == 1.5)
-        #expect(r.cardValid == "5.7.2027")
+@Suite struct AccountInfoTests {
+    /// Shape of the live overview's definition list (whitespace/newlines inside dt/dd included).
+    static func overview(_ rows: [(String, String)]) -> String {
+        let items = rows.map { "<dt class=\"adis-term\">\n  \($0.0)\n </dt>\n <dd class=\"adis-value\">\n  \($0.1)\n </dd>" }
+        return "<title>Mein Konto</title><dl>\n" + items.joined(separator: "\n") + "\n</dl>"
     }
 
-    @Test func noFees() {
-        #expect(HTMLParser.parseFees("Ausweis gültig bis 1.1.2027").fees == 0)
+    @Test func fieldsAreRead() {
+        let html = Self.overview([("Fällige Gebühren", "1,50 EUR"), ("Ausweis gültig bis", "12.08.2027"),
+                                  ("Kontostand vom:", "01.10.2026"), ("Abholcode", "00 Xx")])
+        #expect(HTMLParser.parseAccountInfo(html, term: "Fällige Gebühren") == "1,50 EUR")
+        #expect(HTMLParser.parseAccountInfo(html, term: "Ausweis gültig bis") == "12.08.2027")
+        #expect(HTMLParser.parseAccountInfo(html, term: "Abholcode") == "00 Xx")
+        #expect(HTMLParser.parseAccountInfo(html, term: "Achtung") == nil)
     }
 
-    @Test func bareEuroAmountNeedsAGebuehrenPage() {
-        #expect(HTMLParser.parseFees("Hinweis: Ersatzausweis 2,50 EUR").fees == 0)
-        #expect(HTMLParser.parseFees("Gebühren: 2,50 EUR").fees == 2.5)
+    @Test func amounts() {
+        #expect(HTMLParser.parseAmount("0.40 EUR") == 0.40)
+        #expect(HTMLParser.parseAmount("1,50") == 1.5)
+        #expect(HTMLParser.parseAmount("12 EUR") == 12)
+        #expect(HTMLParser.parseAmount("keine") == nil)
+    }
+
+    @Test func applyReadsEverything() {
+        var data = AccountData(account: LibraryAccount(name: "T", cardNumber: "0"))
+        VOEBBSession.applyAccountInfo(fromOverview: Self.overview([
+            ("Fällige Gebühren", "0.40 EUR"), ("Ausweis gültig bis", "12.08.2027"),
+            ("Abholcode", "00 Xx"), ("Achtung", "Ausweis läuft in 14 Tagen ab"),
+        ]), to: &data)
+        #expect(data.fees == 0.40)
+        #expect(!data.feesUnknown)
+        #expect(data.pickupCode == "00 Xx")
+        #expect(data.cardValidUntil == "12.08.2027")
+        #expect(data.cardExpiryWarning == "Ausweis läuft in 14 Tagen ab")
+    }
+
+    @Test func missingFeesRowOnRecognizableOverviewIsZero() {
+        var data = AccountData(account: LibraryAccount(name: "T", cardNumber: "0"))
+        VOEBBSession.applyAccountInfo(fromOverview: Self.overview([("Kontostand vom:", "01.10.2026")]), to: &data)
+        #expect(data.fees == 0)
+        #expect(!data.feesUnknown)
+    }
+
+    @Test func unrecognizablePageMeansFeesUnknown() {
+        var data = AccountData(account: LibraryAccount(name: "T", cardNumber: "0"))
+        VOEBBSession.applyAccountInfo(fromOverview: "<html>Wartungsarbeiten</html>", to: &data)
+        #expect(data.feesUnknown)
+        #expect(data.pickupCode == nil)
+    }
+}
+
+// MARK: - Loan list validation (parse monitor)
+
+@Suite struct ValidateLoansTests {
+    static func loans(_ n: Int) -> [Loan] {
+        (0..<n).map { Loan(title: "T\($0)", dueDate: Date(), dueDateString: "", library: "B",
+                          renewalStatus: "", checkboxValue: "c\($0)") }
+    }
+
+    @Test func overviewSaysNoneIsFine() throws {
+        try VOEBBSession.validateLoans([], expectedCount: 0, previousCount: 5, pageHTML: "")
+    }
+
+    @Test func emptyOrShortListAgainstOverviewThrows() {
+        #expect(throws: VOEBBError.self) {
+            try VOEBBSession.validateLoans([], expectedCount: 3, previousCount: nil, pageHTML: "rTable")
+        }
+        #expect(throws: VOEBBError.self) {
+            try VOEBBSession.validateLoans(Self.loans(2), expectedCount: 3, previousCount: nil, pageHTML: "rTable")
+        }
+    }
+
+    @Test func completeListPasses() throws {
+        try VOEBBSession.validateLoans(Self.loans(3), expectedCount: 3, previousCount: nil, pageHTML: "")
+    }
+
+    @Test func unknownOverviewCount() throws {
+        // Loans before → an empty list is suspicious.
+        #expect(throws: VOEBBError.self) {
+            try VOEBBSession.validateLoans([], expectedCount: nil, previousCount: 2, pageHTML: "Meine Ausleihen")
+        }
+        // No history: empty is fine only on a recognizable loans page.
+        try VOEBBSession.validateLoans([], expectedCount: nil, previousCount: nil, pageHTML: "<h1>Meine Ausleihen</h1>")
+        #expect(throws: VOEBBError.self) {
+            try VOEBBSession.validateLoans([], expectedCount: nil, previousCount: nil, pageHTML: "<html>Fehler</html>")
+        }
+    }
+
+    @Test func errorsCarryTheParseMonitorMarker() {
+        do {
+            try VOEBBSession.validateLoans(Self.loans(1), expectedCount: 3, previousCount: nil, pageHTML: "")
+            Issue.record("expected throw")
+        } catch {
+            #expect(error.localizedDescription.contains(VOEBBSession.parseBrokenMarker))
+        }
+    }
+}
+
+// MARK: - requestCount
+
+@Suite struct RequestCountTests {
+    @Test func echoedFromThePage() throws {
+        let html = #"<input type="hidden" name="requestCount" value="5"><input type="hidden" name="identity" value="x">"#
+        #expect(try VOEBBSession.requiredRequestCount(in: ADISForm.extractHiddenInputs(html)) == "5")
+    }
+
+    @Test func missingOrInvalidThrows() {
+        #expect(throws: VOEBBError.self) { try VOEBBSession.requiredRequestCount(in: [:]) }
+        #expect(throws: VOEBBError.self) { try VOEBBSession.requiredRequestCount(in: ["requestCount": "abc"]) }
+        #expect(throws: VOEBBError.self) { try VOEBBSession.requiredRequestCount(in: ["requestCount": ""]) }
+    }
+}
+
+// MARK: - Renewal verification
+
+@Suite struct RenewalVerifierTests {
+    private static let calendar = Calendar(identifier: .gregorian)
+
+    private func date(_ day: Int) -> Date {
+        var c = DateComponents(); c.year = 2026; c.month = 10; c.day = day
+        return Self.calendar.date(from: c)!
+    }
+
+    private func loan(_ title: String, due day: Int, cb: String, library: String = "Bib", barcode: String = "") -> Loan {
+        Loan(title: title, dueDate: date(day), dueDateString: "\(day).10.2026", library: library,
+             renewalStatus: "", checkboxValue: cb, mediaNumber: barcode)
+    }
+
+    private func row(_ title: String, cb: String) -> RenewabilityRow {
+        RenewabilityRow(checkboxValue: cb, title: title, renewable: true, reason: "")
+    }
+
+    @Test func allRenewed() {
+        let before = [loan("A", due: 5, cb: "c0"), loan("B", due: 5, cb: "c1")]
+        let after  = [loan("A", due: 26, cb: "c0"), loan("B", due: 26, cb: "c1")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c0"), row("B", cb: "c1")], before: before, after: after)
+        #expect(r.confirmed.map(\.title) == ["A", "B"])
+        #expect(r.unconfirmed.isEmpty)
+        #expect(!r.unverifiable)
+    }
+
+    @Test func partialSuccess() {
+        let before = [loan("A", due: 5, cb: "c0"), loan("B", due: 5, cb: "c1"), loan("C", due: 9, cb: "c2")]
+        let after  = [loan("A", due: 26, cb: "c0"), loan("B", due: 5, cb: "c1"), loan("C", due: 9, cb: "c2")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c0"), row("B", cb: "c1")], before: before, after: after)
+        #expect(r.confirmed.map(\.title) == ["A"])
+        #expect(r.unconfirmed.map(\.title) == ["B"])
+    }
+
+    @Test func nothingChangedIsNotSuccess() {
+        let before = [loan("A", due: 5, cb: "c0")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c0")], before: before, after: before)
+        #expect(r.confirmed.isEmpty)
+        #expect(r.unconfirmed.map(\.title) == ["A"])
+        #expect(!r.unverifiable)
+    }
+
+    @Test func unreadableResultPageIsUnverifiable() {
+        let before = [loan("A", due: 5, cb: "c0")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c0")], before: before, after: [])
+        #expect(r.unconfirmed.map(\.title) == ["A"])
+        #expect(r.unverifiable)
+    }
+
+    @Test func reorderedResultStillMatches() {
+        let before = [loan("A", due: 5, cb: "c0"), loan("B", due: 9, cb: "c1")]
+        let after  = [loan("B", due: 9, cb: "c0"), loan("A", due: 26, cb: "c1")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c0")], before: before, after: after)
+        #expect(r.confirmed.map(\.title) == ["A"])
+    }
+
+    @Test func duplicateCopiesCountedNotDoubled() {
+        let before = [loan("A", due: 5, cb: "c0"), loan("A", due: 5, cb: "c1")]
+        let after  = [loan("A", due: 26, cb: "c0"), loan("A", due: 5, cb: "c1")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c0"), row("A", cb: "c1")], before: before, after: after)
+        #expect(r.confirmed.count == 1)
+        #expect(r.unconfirmed.count == 1)
+    }
+
+    @Test func barcodeIdentifiesTheExactCopy() {
+        // With barcodes, the renewed copy is attributed exactly, not just counted per group.
+        let before = [loan("A", due: 5, cb: "c0", barcode: "11"), loan("A", due: 5, cb: "c1", barcode: "22")]
+        let after  = [loan("A", due: 5, cb: "c0", barcode: "11"), loan("A", due: 26, cb: "c1", barcode: "22")]
+        let r = RenewalVerifier.verify(submitted: [row("A1", cb: "c0"), row("A2", cb: "c1")], before: before, after: after)
+        #expect(r.confirmed.map(\.title) == ["A2"])
+        #expect(r.unconfirmed.map(\.title) == ["A1"])
+    }
+
+    @Test func sameTitleDifferentLibraryIsSeparate() {
+        let before = [loan("A", due: 5, cb: "c0", library: "X"), loan("A", due: 5, cb: "c1", library: "Y")]
+        let after  = [loan("A", due: 26, cb: "c0", library: "X"), loan("A", due: 5, cb: "c1", library: "Y")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c1")], before: before, after: after)
+        #expect(r.confirmed.isEmpty)
+    }
+
+    @Test func preexistingLaterCopyIsNotSuccess() {
+        let before = [loan("A", due: 5, cb: "c0"), loan("A", due: 26, cb: "c1")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c0")], before: before, after: before)
+        #expect(r.confirmed.isEmpty)
+        #expect(r.unconfirmed.count == 1)
+    }
+
+    @Test func renewedNextToAlreadyLaterCopy() {
+        let before = [loan("A", due: 5, cb: "c0"), loan("A", due: 26, cb: "c1")]
+        let after  = [loan("A", due: 26, cb: "c0"), loan("A", due: 26, cb: "c1")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c0")], before: before, after: after)
+        #expect(r.confirmed.count == 1)
+    }
+
+    @Test func unrelatedCopyChangeDoesNotConfirm() {
+        let before = [loan("A", due: 5, cb: "c0"), loan("A", due: 9, cb: "c1")]
+        let after  = [loan("A", due: 5, cb: "c0"), loan("A", due: 30, cb: "c1")]
+        let r = RenewalVerifier.verify(submitted: [row("A", cb: "c0")], before: before, after: after)
+        #expect(r.confirmed.isEmpty)
+    }
+
+    @Test func outcomeMessages() {
+        let a = row("A", cb: "c0"), b = row("B", cb: "c1")
+        #expect(RenewalOutcome(renewed: [a]).userMessage.hasPrefix("1 Medium verlängert."))
+        let partial = RenewalOutcome(renewed: [a], unconfirmed: [b]).userMessage
+        #expect(partial.contains("Nicht bestätigt"))
+        #expect(partial.contains("• B"))
+        let unverifiable = RenewalOutcome(unconfirmed: [a], unverifiable: true).userMessage
+        #expect(unverifiable.hasPrefix("Keine Verlängerung bestätigt."))
+        #expect(unverifiable.contains("nicht überprüft"))
+        #expect(RenewalOutcome().userMessage == "Keine Medien verlängert.")
     }
 }
 

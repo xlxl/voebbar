@@ -111,18 +111,25 @@ struct RenewabilityRow {
     }
 }
 
-/// Result of the two-step renewal (probe → renew only renewable items).
+/// Result of the two-step renewal (probe → renew only renewable items). `renewed` holds only
+/// items whose due date verifiably moved (see `RenewalVerifier`); submitted items without that
+/// confirmation are `unconfirmed`, and `unverifiable` is set when the result page could not be
+/// read as a loans list at all.
 struct RenewalOutcome {
     let renewed: [RenewabilityRow]
     let blocked: [RenewabilityRow]
-    /// Set for special cases (e.g. no loans at all); otherwise nil and the message is built from renewed/blocked.
+    let unconfirmed: [RenewabilityRow]
+    let unverifiable: Bool
+    /// Set for special cases (e.g. no loans at all); otherwise nil and the message is built from the lists.
     let specialMessage: String?
-    /// Warning appended when the renewal submit could not be confirmed from the response.
-    var verificationNote: String?
 
-    init(renewed: [RenewabilityRow] = [], blocked: [RenewabilityRow] = [], specialMessage: String? = nil) {
+    init(renewed: [RenewabilityRow] = [], blocked: [RenewabilityRow] = [],
+         unconfirmed: [RenewabilityRow] = [], unverifiable: Bool = false,
+         specialMessage: String? = nil) {
         self.renewed = renewed
         self.blocked = blocked
+        self.unconfirmed = unconfirmed
+        self.unverifiable = unverifiable
         self.specialMessage = specialMessage
     }
 
@@ -131,9 +138,18 @@ struct RenewalOutcome {
 
         var lines: [String] = []
         if renewed.isEmpty {
-            lines.append("Keine Medien verlängert.")
+            lines.append(unconfirmed.isEmpty ? "Keine Medien verlängert." : "Keine Verlängerung bestätigt.")
         } else {
             lines.append("\(renewed.count) \(renewed.count == 1 ? "Medium" : "Medien") verlängert.")
+        }
+        if !unconfirmed.isEmpty {
+            lines.append("")
+            if unverifiable {
+                lines.append("⚠️ Das Ergebnis konnte nicht überprüft werden – bitte die Ausleihliste kontrollieren:")
+            } else {
+                lines.append("⚠️ Nicht bestätigt (Fälligkeit unverändert):")
+            }
+            lines.append(contentsOf: unconfirmed.map { "• \($0.title.isEmpty ? "Unbekannter Titel" : $0.title)" })
         }
         if !blocked.isEmpty {
             lines.append("")
@@ -144,10 +160,6 @@ struct RenewalOutcome {
                 lines.append("• \(title)\(reason)")
             }
         }
-        if let verificationNote {
-            lines.append("")
-            lines.append("⚠️ \(verificationNote)")
-        }
         return lines.joined(separator: "\n")
     }
 }
@@ -156,7 +168,14 @@ struct AccountData {
     let account: LibraryAccount
     var loans: [Loan] = []
     var fees: Double = 0
+    /// The overview page wasn't recognizable, so `fees` is not a real 0 — show "unknown" instead.
+    var feesUnknown = false
     var cardValidUntil: String = ""
+    /// Pickup code for reserved media ("Abholcode"), from the overview page.
+    var pickupCode: String?
+    /// VÖBB's own card-expiry warning ("Ausweis läuft in N Tagen ab"), present exactly when the
+    /// website shows it.
+    var cardExpiryWarning: String?
     var lastUpdated: Date = Date()
     var error: String?
 

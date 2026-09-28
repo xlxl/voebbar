@@ -91,44 +91,24 @@ enum HTMLParser {
         )
     }
 
-    // MARK: - Fees Page
+    // MARK: - Account info (overview page <dt>/<dd> list)
 
-    static func parseFees(_ html: String) -> (fees: Double, cardValid: String) {
-        var fees = 0.0
-        var cardValid = ""
+    /// One value of the overview page's `<dt>/<dd>` list ("Fällige Gebühren", "Abholcode",
+    /// "Ausweis gültig bis", "Achtung" …), tags stripped; nil when the term is absent or empty.
+    static func parseAccountInfo(_ html: String, term: String) -> String? {
+        let pattern = "<dt[^>]*>\\s*" + NSRegularExpression.escapedPattern(for: term) + "\\s*</dt>\\s*<dd[^>]*>(.*?)</dd>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators, .caseInsensitive]),
+              let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let range = Range(match.range(at: 1), in: html)
+        else { return nil }
+        let value = stripHTML(String(html[range])).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
 
-        // Pattern: Fällige Gebühren 1.00
-        // Fallback: a bare "1.00 EUR" — but ONLY on a page that talks about Gebühren at all,
-        // otherwise any unrelated EUR amount (e.g. a fee-schedule hint) would be picked up.
-        var feePatterns = [#"Fällige Gebühren\s+([\d,\.]+)"#]
-        if html.contains("Gebühr") {
-            feePatterns.append(#"([\d]+[,\.][\d]+)\s*EUR"#)
-        }
-        for pattern in feePatterns {
-            if let m = html.range(of: pattern, options: .regularExpression) {
-                let matchStr = String(html[m])
-                // Extract number
-                let numPattern = try! NSRegularExpression(pattern: #"([\d]+[,\.][\d]+)"#)
-                let matchRange = NSRange(matchStr.startIndex..., in: matchStr)
-                if let numMatch = numPattern.firstMatch(in: matchStr, range: matchRange),
-                   let numRange = Range(numMatch.range(at: 1), in: matchStr) {
-                    let numStr = String(matchStr[numRange])
-                        .replacingOccurrences(of: ",", with: ".")
-                    fees = Double(numStr) ?? 0
-                    break
-                }
-            }
-        }
-
-        // Card validity: "Ausweis gültig bis 5.7.2026"
-        if let m = html.range(of: #"Ausweis gültig bis\s+([^\s<]+)"#, options: .regularExpression) {
-            let matchStr = String(html[m])
-            cardValid = matchStr
-                .replacingOccurrences(of: "Ausweis gültig bis", with: "")
-                .trimmingCharacters(in: .whitespaces)
-        }
-
-        return (fees, cardValid)
+    /// First decimal amount in a text ("1,50 EUR" → 1.5).
+    static func parseAmount(_ text: String) -> Double? {
+        guard let m = text.range(of: #"\d+(?:[.,]\d+)?"#, options: .regularExpression) else { return nil }
+        return Double(text[m].replacingOccurrences(of: ",", with: "."))
     }
 
     // MARK: - Renewability Probe ("Markierte Medien verlängerbar?")

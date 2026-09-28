@@ -35,78 +35,111 @@ final class VOEBBSession {
         let (appURL, overviewHTML) = try await login(password: password)
         var data = AccountData(account: account)
 
-        let loanCount = HTMLParser.parseLoanCount(overviewHTML)
+        // Everything account-level sits in the overview's <dt>/<dd> list — no *SGG navigation.
+        // (Navigating *SGG from the probe result page is silently ignored by aDIS: it returns the
+        // loans page again, and fees read as 0 € for accounts with loans AND fees.)
+        Self.applyAccountInfo(fromOverview: overviewHTML, to: &data)
 
-        // loanCount == 0  → definitiv keine Ausleihen, direkt zu Gebühren
+        let loanCount = HTMLParser.parseLoanCount(overviewHTML)
+        // Every page carries a new single-use identity token, so the next request (incl. the
+        // logout) always has to start from the page loaded last.
+        var currentHTML = overviewHTML
+
+        // loanCount == 0  → definitiv keine Ausleihen
         // loanCount > 0   → Ausleihen vorhanden, Seite abrufen
         // loanCount == nil → Erkennung unsicher, Ausleihen trotzdem probieren
         if loanCount != 0 {
-            let (loansHTML, loansURL) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZA", rc: 3)
+            let (loansHTML, loansURL) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZA")
+            currentHTML = loansHTML
             var parsed = HTMLParser.parseLoans(loansHTML)
 
-            // Parse-Monitor: käme hier fälschlich eine leere Liste durch, würde das Archiv ALLE
-            // offenen Ausleihen als zurückgegeben schließen — Historienschaden. Zwei Fälle:
-            // (a) Übersicht sagt N > 0, aber die Ausleihen-Tabelle ist unparsebar → Markup-Bruch.
-            // (b) Übersicht selbst unlesbar (nil) UND vorher gab es Ausleihen → konservativ
-            //     ebenfalls Fehler (echte Komplett-Rückgabe läuft über loanCount == 0).
-            if parsed.isEmpty {
-                if let n = loanCount, n > 0 {
-                    throw VOEBBError.parseError("\(Self.parseBrokenMarker) (Übersicht meldet \(n)) – VÖBB-Markup geändert? Archiv bleibt unangetastet.")
-                }
-                if loanCount == nil, let prev = previousLoanCount, prev > 0 {
-                    throw VOEBBError.parseError("\(Self.parseBrokenMarker) (vorher \(prev), Übersicht unlesbar) – VÖBB-Markup geändert? Archiv bleibt unangetastet.")
-                }
+            // Parse-Monitor: a wrongly empty or short list would make the archive close open
+            // loans as returned — history damage. So it throws instead (see validateLoans).
+            do {
+                try Self.validateLoans(parsed, expectedCount: loanCount,
+                                       previousCount: previousLoanCount, pageHTML: loansHTML)
+            } catch {
+                await logout(appURL: appURL, fromHTML: loansHTML)
+                throw error
             }
 
-            // Gebühren: von der Ausleihseite aus (rc=4) falls Bücher gefunden,
-            // sonst von der Übersicht (rc=3) – Fallback falls *SZA kein loans-HTML lieferte
             if !parsed.isEmpty {
                 // Verlängerbarkeit proben ("Markierte Medien verlängerbar?", lesend) und
                 // pro Buch mergen. Fehlertolerant: ohne Probe bleiben die Felder einfach nil.
-                var feesSourceHTML = loansHTML
-                var feesRC = 4
                 do {
                     let probe = try await probeRenewability(
-                        appURL: appURL, fromHTML: loansHTML, referer: loansURL, requestCount: 4,
+                        appURL: appURL, fromHTML: loansHTML, referer: loansURL,
                         checkboxValues: parsed.map(\.checkboxValue).filter { !$0.isEmpty }
                     )
-                    if !probe.rows.isEmpty {
-                        let byCheckbox = Dictionary(probe.rows.map { ($0.checkboxValue, $0) },
-                                                    uniquingKeysWith: { first, _ in first })
-                        for i in parsed.indices {
-                            if let s = byCheckbox[parsed[i].checkboxValue] {
-                                parsed[i].isRenewable = s.renewable
-                                parsed[i].renewalReason = s.reason
-                            }
+                    currentHTML = probe.html
+                    let byCheckbox = Dictionary(probe.rows.map { ($0.checkboxValue, $0) },
+                                                uniquingKeysWith: { first, _ in first })
+                    for i in parsed.indices {
+                        if let s = byCheckbox[parsed[i].checkboxValue] {
+                            parsed[i].isRenewable = s.renewable
+                            parsed[i].renewalReason = s.reason
                         }
-                        feesSourceHTML = probe.html
-                        feesRC = 5
                     }
                 } catch {
                     // Probe fehlgeschlagen → Ausleihen ohne Verlängerbarkeits-Info anzeigen
                 }
                 data.loans = parsed
-
-                let (feesHTML, _) = try await navigate(appURL: appURL, fromHTML: feesSourceHTML, navCode: "*SGG", rc: feesRC)
-                let (fees, cardValid) = HTMLParser.parseFees(feesHTML)
-                data.fees = fees
-                data.cardValidUntil = cardValid
-            } else {
-                let (feesHTML, _) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SGG", rc: 3)
-                let (fees, cardValid) = HTMLParser.parseFees(feesHTML)
-                data.fees = fees
-                data.cardValidUntil = cardValid
             }
-        } else {
-            // Keine Ausleihen laut Übersicht → direkt Gebühren
-            let (feesHTML, _) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SGG", rc: 3)
-            let (fees, cardValid) = HTMLParser.parseFees(feesHTML)
-            data.fees = fees
-            data.cardValidUntil = cardValid
         }
 
+        await logout(appURL: appURL, fromHTML: currentHTML)
         data.lastUpdated = Date()
         return data
+    }
+
+    /// Fees, pickup code, card validity and VÖBB's expiry warning from the overview's `<dt>/<dd>`
+    /// list. A missing fees row counts as 0 € only when the page is recognizably the overview
+    /// (other terms present); otherwise `feesUnknown` is set instead of silently reporting 0.
+    static func applyAccountInfo(fromOverview html: String, to data: inout AccountData) {
+        if let raw = HTMLParser.parseAccountInfo(html, term: "Fällige Gebühren"),
+           let amount = HTMLParser.parseAmount(raw) {
+            data.fees = amount
+        } else if HTMLParser.parseAccountInfo(html, term: "Kontostand vom:") != nil
+                    || HTMLParser.parseAccountInfo(html, term: "Abholcode") != nil
+                    || HTMLParser.parseAccountInfo(html, term: "Ausweis gültig bis") != nil {
+            data.fees = 0
+        } else {
+            data.feesUnknown = true
+        }
+        data.pickupCode = HTMLParser.parseAccountInfo(html, term: "Abholcode")
+        data.cardValidUntil = HTMLParser.parseAccountInfo(html, term: "Ausweis gültig bis") ?? ""
+        data.cardExpiryWarning = HTMLParser.parseAccountInfo(html, term: "Achtung")
+    }
+
+    /// Cross-checks the parsed loans list against the overview's count. A parser/page failure must
+    /// never look like an empty (or shorter) account:
+    /// - overview says N > 0, list is empty or shorter → markup break
+    /// - overview unreadable (nil), list empty, and there were loans before → conservatively broken
+    /// - overview unreadable, list empty, page not even recognizable as the loans list → broken
+    static func validateLoans(_ parsed: [Loan], expectedCount: Int?, previousCount: Int?, pageHTML: String) throws {
+        if let expected = expectedCount {
+            guard expected > 0 else { return }  // Übersicht sagt explizit: keine Ausleihen
+            if parsed.isEmpty {
+                throw VOEBBError.parseError("\(parseBrokenMarker) (Übersicht meldet \(expected)) – VÖBB-Markup geändert? Archiv bleibt unangetastet.")
+            }
+            if parsed.count < expected {
+                throw VOEBBError.parseError("\(parseBrokenMarker) (nur \(parsed.count) von \(expected) gelesen) – VÖBB-Markup geändert? Archiv bleibt unangetastet.")
+            }
+        } else if parsed.isEmpty {
+            if let prev = previousCount, prev > 0 {
+                throw VOEBBError.parseError("\(parseBrokenMarker) (vorher \(prev), Übersicht unlesbar) – VÖBB-Markup geändert? Archiv bleibt unangetastet.")
+            }
+            let looksLikeLoansPage = pageHTML.contains("Meine Ausleihen") || pageHTML.contains("rTable")
+            if !looksLikeLoansPage {
+                throw VOEBBError.parseError("\(parseBrokenMarker) (Ausleihseite nicht erkannt) – VÖBB-Markup geändert? Archiv bleibt unangetastet.")
+            }
+        }
+    }
+
+    /// Ends the aDIS session server-side (nav code *SE). Fire-and-forget: errors are ignored on
+    /// purpose; it only avoids orphaned sessions at VÖBB.
+    private func logout(appURL: String, fromHTML: String) async {
+        _ = try? await navigate(appURL: appURL, fromHTML: fromHTML, navCode: "*SE")
     }
 
     /// Renews all renewable loans.
@@ -144,64 +177,86 @@ final class VOEBBSession {
     ) async throws -> RenewalOutcome {
         let (appURL, overviewHTML) = try await login(password: password)
 
-        let (loansHTML, loansURL) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZA", rc: 3)
+        let (loansHTML, loansURL) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZA")
         let loans = HTMLParser.parseLoans(loansHTML)
+        // An unreadable loans page must not end as "Keine Ausleihen vorhanden".
+        do {
+            try Self.validateLoans(loans, expectedCount: HTMLParser.parseLoanCount(overviewHTML),
+                                   previousCount: nil, pageHTML: loansHTML)
+        } catch {
+            await logout(appURL: appURL, fromHTML: loansHTML)
+            throw error
+        }
 
         guard !loans.isEmpty else {
+            await logout(appURL: appURL, fromHTML: loansHTML)
             return RenewalOutcome(specialMessage: "Keine Ausleihen vorhanden")
         }
 
         // Only the selected candidates are probed/renewed — never touch the others.
         let candidateCheckboxes = loans.filter(select).map(\.checkboxValue).filter { !$0.isEmpty }
         guard !candidateCheckboxes.isEmpty else {
+            await logout(appURL: appURL, fromHTML: loansHTML)
             return RenewalOutcome(specialMessage: noMatchMessage)
         }
 
         // Step 1: probe "verlängerbar?" ($Button$2) with only the candidates checked.
         let probe = try await probeRenewability(
-            appURL: appURL, fromHTML: loansHTML, referer: loansURL, requestCount: 4,
+            appURL: appURL, fromHTML: loansHTML, referer: loansURL,
             checkboxValues: candidateCheckboxes
         )
         // The probe reports on the marked media; restrict to our candidate set defensively.
         let candidateSet = Set(candidateCheckboxes)
         let statuses = probe.rows.filter { candidateSet.contains($0.checkboxValue) }
+        // Every marked row must carry a marker — otherwise the response isn't a probe page
+        // (session error etc.) and the media's state is unknown; don't report "nothing renewed".
+        guard statuses.count == candidateCheckboxes.count else {
+            await logout(appURL: appURL, fromHTML: probe.html)
+            throw VOEBBError.parseError(
+                "Verlängerbarkeits-Prüfung nicht lesbar (\(statuses.count) von \(candidateCheckboxes.count) Medien erkannt)"
+            )
+        }
         let renewable = statuses.filter { $0.renewable }
         let blocked = statuses.filter { !$0.renewable }
 
         guard !renewable.isEmpty else {
+            await logout(appURL: appURL, fromHTML: probe.html)
             return RenewalOutcome(renewed: [], blocked: blocked)
         }
 
         // Step 2: renew only the confirmed-renewable candidates ($Button$1).
         let resultHTML = try await pressRenewalButton(
             appURL: appURL, fromHTML: probe.html, referer: appURL,
-            buttonField: "$Button$1", focusID: "$$GFBO_4", requestCount: 5,
+            buttonField: "$Button$1", focusID: "$$GFBO_4",
             checkboxValues: renewable.map(\.checkboxValue)
         )
 
-        var outcome = RenewalOutcome(renewed: renewable, blocked: blocked)
+        // Report success per item from the moved due date on the result page — never infer it
+        // from the probe alone.
+        let verification = RenewalVerifier.verify(
+            submitted: renewable,
+            before: loans,
+            after: HTMLParser.parseLoans(resultHTML)
+        )
 
-        // Sanity check: if the response renders the loans table again and its due dates are
-        // completely unchanged, the submit likely didn't take effect — warn instead of
-        // claiming success. (If the response isn't a loans table, we can't verify; stay quiet.)
-        let afterLoans = HTMLParser.parseLoans(resultHTML)
-        if !afterLoans.isEmpty,
-           afterLoans.map(\.dueDateString).sorted() == loans.map(\.dueDateString).sorted() {
-            outcome.verificationNote = "Verlängerung konnte nicht bestätigt werden – die Fälligkeitsdaten sind unverändert. Bitte Liste prüfen."
-        }
-
-        return outcome
+        await logout(appURL: appURL, fromHTML: resultHTML)
+        return RenewalOutcome(
+            renewed: verification.confirmed,
+            blocked: blocked,
+            unconfirmed: verification.unconfirmed,
+            unverifiable: verification.unverifiable
+        )
     }
 
     /// Presses "Markierte Medien verlängerbar?" ($Button$2, read-only) for the given
     /// checkboxes and parses the per-row renewability markers from the response.
     private func probeRenewability(
-        appURL: String, fromHTML: String, referer: String, requestCount: Int,
+        appURL: String, fromHTML: String, referer: String,
         checkboxValues: [String]
     ) async throws -> (html: String, rows: [RenewabilityRow]) {
         let html = try await pressRenewalButton(
             appURL: appURL, fromHTML: fromHTML, referer: referer,
-            buttonField: "$Button$2", focusID: "$$GFBO_7", requestCount: requestCount,
+            buttonField: "$Button$2", focusID: "$$GFBO_7",
             checkboxValues: checkboxValues
         )
         return (html, HTMLParser.parseRenewability(html))
@@ -212,11 +267,11 @@ final class VOEBBSession {
     /// encoded manually (URLSession can't send duplicate keys via a dictionary).
     private func pressRenewalButton(
         appURL: String, fromHTML: String, referer: String,
-        buttonField: String, focusID: String, requestCount: Int,
+        buttonField: String, focusID: String,
         checkboxValues: [String]
     ) async throws -> String {
         var postData = extractHiddenInputs(fromHTML)
-        postData["requestCount"] = "\(requestCount)"
+        _ = try Self.requiredRequestCount(in: postData)
         postData["scriptEnabled"] = "true"
         postData["overrideScrollPos"] = "0"
         postData["focus"] = focusID
@@ -302,11 +357,24 @@ final class VOEBBSession {
 
     // MARK: - Private: Navigation
 
-    private func navigate(appURL: String, fromHTML: String, navCode: String, rc: Int) async throws -> (html: String, url: String) {
+    // aDIS's request counter (`requestCount`) is a hidden field on every page and is echoed back
+    // unchanged, like a browser does — never overwritten with fixed values: the sequence depends
+    // on the session's history (a session that browsed before logging in starts at 5, not 3).
+
+    /// aDIS expects the counter on every follow-up request. Without it the current page isn't a
+    /// regular aDIS page (session expired, error page) — abort rather than send a broken request.
+    static func requiredRequestCount(in hidden: [String: String]) throws -> String {
+        guard let rc = hidden["requestCount"], Int(rc) != nil else {
+            throw VOEBBError.parseError("Seite ohne gültigen Request-Zähler – Sitzung ungültig?")
+        }
+        return rc
+    }
+
+    private func navigate(appURL: String, fromHTML: String, navCode: String) async throws -> (html: String, url: String) {
         var data = extractHiddenInputs(fromHTML)
+        _ = try Self.requiredRequestCount(in: data)
         data["scriptEnabled"] = "true"
         data["overrideScrollPos"] = "0"
-        data["requestCount"] = "\(rc)"
         data["selected"] = "ZTEXT       \(navCode)"
         data["$Select"] = "Überall suchen"
 

@@ -521,6 +521,15 @@ final class StatusBarController: NSObject {
             return
         }
 
+        // VÖBB's own card-expiry warning — shown exactly when the website shows it.
+        if let warning = data.cardExpiryWarning {
+            let item = add(to: menu, title: "  ⚠️  \(warning)", enabled: false)
+            item.attributedTitle = NSAttributedString(
+                string: "  ⚠️  \(warning)",
+                attributes: [.foregroundColor: NSColor.systemOrange, .font: NSFont.menuFont(ofSize: 0)]
+            )
+        }
+
         // Ausleihen-Zeile
         if data.loans.isEmpty {
             add(to: menu, title: "  📗  Keine Ausleihen", enabled: false)
@@ -539,10 +548,17 @@ final class StatusBarController: NSObject {
         }
 
         // Gebühren
-        if data.fees > 0 {
+        if data.feesUnknown {
+            add(to: menu, title: "  💶  Gebühren unbekannt", enabled: false)
+        } else if data.fees > 0 {
             add(to: menu, title: String(format: "  💶  %.2f € Gebühren", data.fees), enabled: false)
         } else {
             add(to: menu, title: "  ✅  Keine Gebühren", enabled: false)
+        }
+
+        if let code = data.pickupCode {
+            let item = add(to: menu, title: "  🔑  Abholcode \(code)", enabled: false)
+            if !data.cardValidUntil.isEmpty { item.toolTip = "Ausweis gültig bis \(data.cardValidUntil)" }
         }
 
         // Verlängern-Buttons
