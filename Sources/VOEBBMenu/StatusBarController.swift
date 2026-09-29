@@ -18,6 +18,10 @@ final class StatusBarController: NSObject {
     /// until its result was shown. Blocks a second renewal and any refresh in between — the timer
     /// or `menuWillOpen` must not log in again or replace the list mid-submit.
     private var isRenewing = false
+    /// A refresh was requested while one of the flags above blocked it (e.g. right after adding an
+    /// account, while the previous run is still enriching). Caught up once the busy phase ends
+    /// instead of being dropped until the next timer tick.
+    private var refreshPending = false
 
     private static let maxTitleLength = 40
 
@@ -67,7 +71,11 @@ final class StatusBarController: NSObject {
     // MARK: - Refresh
 
     func refresh() {
-        guard !isLoading, !isEnriching, !isRenewing else { return }
+        guard !isLoading, !isEnriching, !isRenewing else {
+            refreshPending = true
+            return
+        }
+        refreshPending = false
 
         let accounts = AccountStorage.shared.accounts
         guard !accounts.isEmpty else {
@@ -79,6 +87,8 @@ final class StatusBarController: NSObject {
 
         isLoading = true
         updateButtonForLoading()
+        // First load: until now there is no menu at all, and the icon wouldn't react to a click.
+        if currentData.isEmpty { updateMenu() }
 
         // Vorherige Ausleihzahlen (auf dem Main-Thread erfasst) für den Parse-Monitor.
         let previousCounts = Dictionary(uniqueKeysWithValues: currentData.map {
@@ -136,44 +146,45 @@ final class StatusBarController: NSObject {
             await ToniesEnricher.shared.enrichMissing()
 
             EnrichmentProgress.shared.stop()
-            await MainActor.run { self.isEnriching = false }
+            await MainActor.run {
+                self.isEnriching = false
+                self.catchUpPendingRefresh()
+            }
         }
     }
 
     // MARK: - Renewal
 
     func renewAll(for accountData: AccountData) {
+        let account = accountData.account
         performRenewal(
-            for: accountData.account,
             confirmTitle: "Alle verlängern?",
             confirmMessage: confirmationMessage(
-                lead: "Für »\(accountData.account.name)« \(loanPhrase(accountData.loans.count)) zur Verlängerung eingereicht.",
+                lead: "Für »\(account.name)« \(loanPhrase(accountData.loans.count)) zur Verlängerung eingereicht.",
                 loans: accountData.loans),
-            resultTitle: accountData.account.name
-        ) { session, password in
-            try await session.renewAllLoans(password: password)
-        }
+            resultTitle: account.name,
+            jobs: [(account, { session, password in try await session.renewAllLoans(password: password) })]
+        )
     }
 
     /// Verlängert für ein Konto nur die demnächst fälligen Bücher (und nur die).
     func renewDueSoon(for accountData: AccountData) {
+        let account = accountData.account
         let days = AccountStorage.shared.renewalDueDays
         let due = accountData.loans.filter { $0.daysUntilDue <= days }
         performRenewal(
-            for: accountData.account,
             confirmTitle: "Fällige verlängern?",
             confirmMessage: confirmationMessage(
-                lead: "Für »\(accountData.account.name)« \(loanPhrase(due.count)) mit Fälligkeit in ≤ \(days) Tagen zur Verlängerung eingereicht.",
+                lead: "Für »\(account.name)« \(loanPhrase(due.count)) mit Fälligkeit in ≤ \(days) Tagen zur Verlängerung eingereicht.",
                 loans: due),
-            resultTitle: "\(accountData.account.name) – fällige verlängern"
-        ) { session, password in
-            try await session.renewDueLoans(password: password, withinDays: days)
-        }
+            resultTitle: "\(account.name) – fällige verlängern",
+            jobs: [(account, { session, password in try await session.renewDueLoans(password: password, withinDays: days) })]
+        )
     }
 
     /// Renews exactly the given loans (from the overview window's selection), which may span
-    /// several accounts — one session per account, sequentially, results merged into one message.
-    /// Loans are addressed by `Loan.renewalKey`, not by the session-local checkbox value.
+    /// several accounts — one job per account. Loans are addressed by `Loan.renewalKey`, not by
+    /// the session-local checkbox value.
     func renewSelected(_ selection: [(account: LibraryAccount, loan: Loan)], anchor: NSWindow?) {
         guard !selection.isEmpty else { return }
 
@@ -189,87 +200,66 @@ final class StatusBarController: NSObject {
                 : nil)
 
         // Gruppiert nach Konto: pro Konto ein Login, alle Schlüssel dieses Kontos in einem Durchlauf.
-        let grouped = Dictionary(grouping: selection, by: { $0.account.cardNumber })
-        guard beginRenewal() else { return }
-
-        Task { @MainActor in
-            guard await Alerts.confirm(
-                title: loans.count == 1 ? "Medium verlängern?" : "\(loans.count) Medien verlängern?",
-                message: message, confirmTitle: "Verlängern", window: anchor)
-            else {
-                self.endRenewal()
-                return
-            }
-            self.updateButtonForLoading()
-
-            var blocks: [String] = []
-            for (_, entries) in grouped.sorted(by: { $0.value[0].account.name < $1.value[0].account.name }) {
-                let account = entries[0].account
+        let jobs: [RenewalJob] = Dictionary(grouping: selection, by: { $0.account.cardNumber }).values
+            .sorted { $0[0].account.name < $1[0].account.name }
+            .map { entries in
                 let keys = Set(entries.map(\.loan.renewalKey))
-                let body: String
-                if let password = AccountStorage.shared.password(for: account) {
-                    do {
-                        body = try await VOEBBSession(account: account)
-                            .renewLoans(password: password, keys: keys).userMessage
-                    } catch {
-                        // Ein defektes Konto darf die anderen nicht abbrechen.
-                        body = "⚠️ \(error.localizedDescription)"
-                    }
-                } else {
-                    body = "⚠️ Kein Passwort gespeichert"
-                }
-                blocks.append(grouped.count > 1 ? "\(account.name):\n\(body)" : body)
+                return (entries[0].account, { session, password in try await session.renewLoans(password: password, keys: keys) })
             }
-
-            self.endRenewal()
-            await Alerts.info(title: loans.count == 1 ? "Verlängerung" : "Verlängerung der Auswahl",
-                              message: blocks.joined(separator: "\n\n"), window: anchor)
-            // Erst den Button zurücksetzen: läuft z.B. gerade eine Anreicherung, steigt `refresh()`
-            // sofort wieder aus und die Ladeanzeige würde hängen bleiben.
-            self.updateButton()
-            self.refresh()
-        }
+        performRenewal(
+            confirmTitle: loans.count == 1 ? "Medium verlängern?" : "\(loans.count) Medien verlängern?",
+            confirmMessage: message,
+            resultTitle: loans.count == 1 ? "Verlängerung" : "Verlängerung der Auswahl",
+            anchor: anchor,
+            jobs: jobs
+        )
     }
 
+    private typealias RenewalJob = (account: LibraryAccount, run: (VOEBBSession, String) async throws -> RenewalOutcome)
+
+    /// The one renewal path for the status menu and the overview window: confirm → one session per
+    /// account, sequentially → one merged result message → refresh. A broken account doesn't stop
+    /// the others; its error becomes its block in the result.
     private func performRenewal(
-        for account: LibraryAccount,
         confirmTitle: String,
         confirmMessage: String,
         resultTitle: String,
         anchor: NSWindow? = nil,
-        _ run: @escaping (VOEBBSession, String) async throws -> RenewalOutcome
+        jobs: [RenewalJob]
     ) {
-        guard let password = AccountStorage.shared.password(for: account) else {
-            Task { @MainActor in
-                await Alerts.info(title: "Kein Passwort gespeichert",
-                                  message: "Für »\(account.name)« liegt kein Passwort im Schlüsselbund.",
-                                  window: anchor)
-            }
-            return
-        }
-        guard beginRenewal() else { return }
+        guard !jobs.isEmpty, beginRenewal() else { return }
 
         Task { @MainActor in
             guard await Alerts.confirm(title: confirmTitle, message: confirmMessage,
                                        confirmTitle: "Verlängern", window: anchor)
             else {
                 self.endRenewal()
+                self.catchUpPendingRefresh()
                 return
             }
             self.updateButtonForLoading()
-            let session = VOEBBSession(account: account)
-            do {
-                let outcome = try await run(session, password)
-                self.endRenewal()
-                await Alerts.info(title: resultTitle, message: outcome.userMessage, window: anchor)
-                self.updateButton()   // s. renewSelected: refresh() kann sofort aussteigen
-                self.refresh()
-            } catch {
-                self.endRenewal()
-                self.updateButton()
-                await Alerts.info(title: "Fehler beim Verlängern",
-                                  message: error.localizedDescription, window: anchor)
+
+            var blocks: [String] = []
+            for job in jobs {
+                let body: String
+                if let password = AccountStorage.shared.password(for: job.account) {
+                    do {
+                        body = try await job.run(VOEBBSession(account: job.account), password).userMessage
+                    } catch {
+                        body = "⚠️ \(error.localizedDescription)"
+                    }
+                } else {
+                    body = "⚠️ Kein Passwort gespeichert"
+                }
+                blocks.append(jobs.count > 1 ? "\(job.account.name):\n\(body)" : body)
             }
+
+            self.endRenewal()
+            await Alerts.info(title: resultTitle, message: blocks.joined(separator: "\n\n"), window: anchor)
+            // Erst den Button zurücksetzen: läuft z.B. gerade eine Anreicherung, steigt `refresh()`
+            // sofort wieder aus und die Ladeanzeige würde hängen bleiben.
+            self.updateButton()
+            self.refresh()
         }
     }
 
@@ -281,6 +271,10 @@ final class StatusBarController: NSObject {
     }
 
     private func endRenewal() { isRenewing = false }
+
+    private func catchUpPendingRefresh() {
+        if refreshPending { refresh() }
+    }
 
     private static let confirmListLimit = 8
 
@@ -387,7 +381,10 @@ final class StatusBarController: NSObject {
 
         let defaults = UserDefaults.standard
         let previous = Set(defaults.stringArray(forKey: Self.notifiedKey) ?? [])
-        defaults.set(Array(keys), forKey: Self.notifiedKey)   // prune + remember current state
+        // Prune to the current loans — but only when every account was read: a failed account
+        // would otherwise lose its entries and notify about the same loans again once it's back.
+        let allRead = results.allSatisfy { $0.error == nil }
+        defaults.set(Array(allRead ? keys : keys.union(previous)), forKey: Self.notifiedKey)
         guard !due.isEmpty, !keys.subtracting(previous).isEmpty else { return }
 
         let overdue = due.filter(\.isOverdue).count
@@ -566,14 +563,13 @@ final class StatusBarController: NSObject {
         }
 
         // Summary line. Fees only appear when there is something to say (due or unknown).
+        let next = data.loans.min(by: { $0.dueDate < $1.dueDate })
         var parts: [String] = []
-        if data.loans.isEmpty {
-            parts.append("Keine Ausleihen")
-        } else {
+        if let next {
             parts.append("\(data.loans.count) Ausleihe\(data.loans.count == 1 ? "" : "n")")
-            if let next = data.loans.min(by: { $0.dueDate < $1.dueDate }) {
-                parts.append("nächste \(String(next.dueDateString.prefix(6)))")   // "09.10.2026" → "09.10."
-            }
+            parts.append("nächste \(String(next.dueDateString.prefix(6)))")   // "09.10.2026" → "09.10."
+        } else {
+            parts.append("Keine Ausleihen")
         }
         if data.feesUnknown {
             parts.append("Gebühren unbekannt")
@@ -583,10 +579,11 @@ final class StatusBarController: NSObject {
         let summaryItem = add(to: menu, title: "", enabled: false)
         summaryItem.attributedTitle = UrgencyStyle.dotTitle(parts.joined(separator: " · "), color: data.urgencyColor)
         var tip: [String] = []
-        if let next = data.loans.min(by: { $0.dueDate < $1.dueDate }) {
+        if let next {
+            // `daysUntilDue` is clamped to 0, so overdue has to be asked for explicitly.
             let days = next.daysUntilDue
-            tip.append(days < 0 ? "Überfällig seit \(next.dueDateString)"
-                                : "Nächste Rückgabe: \(next.dueDateString) (\(days) Tag\(days == 1 ? "" : "e"))")
+            tip.append(next.isOverdue ? "Überfällig seit \(next.dueDateString)"
+                                      : "Nächste Rückgabe: \(next.dueDateString) (\(days) Tag\(days == 1 ? "" : "e"))")
         }
         if !data.feesUnknown && data.fees == 0 { tip.append("Keine Gebühren") }
         if !data.cardValidUntil.isEmpty { tip.append("Ausweis gültig bis \(data.cardValidUntil)") }

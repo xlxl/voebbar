@@ -5,7 +5,7 @@ import AppKit
 /// dark mode, and doesn't claim a Tonie or DVD is a book.
 enum UrgencyStyle {
     static func color(daysUntilDue days: Int) -> NSColor {
-        if days < Urgency.urgentDays { return .systemRed }   // overdue days are negative
+        if days < Urgency.urgentDays { return .systemRed }   // overdue loans count as 0 days
         if days <= Urgency.soonDays { return .systemOrange }
         return .systemGreen
     }

@@ -11,6 +11,7 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
     private var allLoans: [(account: LibraryAccount, loan: Loan)] = []
     private var sortOrder: NSSortDescriptor?
     private var renewButton: NSButton?
+    private var summaryLabel: NSTextField?
 
     private var statusBar: StatusBarController? {
         (NSApp.delegate as? AppDelegate)?.statusBarController
@@ -73,8 +74,8 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         let summaryLabel = label("", font: .systemFont(ofSize: 11))
         summaryLabel.textColor = .secondaryLabelColor
         summaryLabel.translatesAutoresizingMaskIntoConstraints = false
-        summaryLabel.tag = 1001
         toolbar.addSubview(summaryLabel)
+        self.summaryLabel = summaryLabel
 
         let refreshBtn = NSButton(title: "↺  Aktualisieren", target: self, action: #selector(onRefresh))
         refreshBtn.bezelStyle = .rounded
@@ -139,10 +140,7 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
             c.title = col.title
             c.width = col.width
             c.minWidth = col.minWidth
-            if col.id == "due" || col.id == "days" {
-                c.sortDescriptorPrototype = NSSortDescriptor(key: col.id, ascending: true)
-            }
-            if col.id == "title" {
+            if ["title", "due", "days"].contains(col.id) {
                 c.sortDescriptorPrototype = NSSortDescriptor(key: col.id, ascending: true)
             }
             table.addTableColumn(c)
@@ -178,8 +176,7 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
     // MARK: - Summary Label
 
     private func updateSummaryLabel() {
-        guard let win = window,
-              let label = win.contentView?.viewWithTag(1001) as? NSTextField else { return }
+        guard let label = summaryLabel else { return }
 
         let total = allLoans.count
         if total == 0 {

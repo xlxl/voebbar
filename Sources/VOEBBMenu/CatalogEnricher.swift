@@ -14,7 +14,6 @@ final class CatalogEnricher {
     private init() {}
 
     private let base = "https://www.voebb.de"
-    private let userAgent = ADISForm.userAgent
     private let politeDelay: UInt64 = 400_000_000 // 0.4 s between items
 
     // MARK: - Orchestration
@@ -226,7 +225,7 @@ final class CatalogEnricher {
     /// Opens the full record from a Trefferliste (re-POST the page's hidden inputs plus the
     /// record's `selected` code). Same mechanism as voebbar's `navigate()`.
     private func openVollanzeige(recordID: String, term: String, trefferliste: String, ctx: Ctx) async throws -> String {
-        var data = extractHiddenInputs(trefferliste)
+        var data = ADISForm.extractHiddenInputs(trefferliste)
         data["keyCode"] = "0"
         data["focus"] = ""
         data["stz"] = ""
@@ -240,8 +239,7 @@ final class CatalogEnricher {
         data["$Select"] = "Überall suchen"
         data["$Tab"] = "0"
 
-        let body = data.map { "\(urlEncode($0.key))=\(urlEncode($0.value))" }.joined(separator: "&")
-        return try await ADISHTTP.postRaw(ctx.appURL, body: body, session: ctx.session, referer: ctx.appURL)
+        return try await ADISHTTP.postRaw(ctx.appURL, body: ADISForm.encode(data), session: ctx.session, referer: ctx.appURL)
     }
 
     // MARK: - Catalog HTTP flow
@@ -256,15 +254,15 @@ final class CatalogEnricher {
     private func bootstrap() async throws -> Ctx {
         let session = ADISHTTP.makeSession()
         let html = try await ADISHTTP.get("\(base)/aDISWeb/app/prod00?sp=SPROD00", session: session)
-        guard let idMatch = html.range(of: #"/aDISWeb/_[a-z0-9]+/app"#, options: .regularExpression) else {
+        guard let sid = ADISForm.sessionID(in: html) else {
             throw VOEBBError.parseError("Katalog-Session nicht gefunden")
         }
-        let sid = String(html[idMatch])
-            .replacingOccurrences(of: "/aDISWeb/", with: "")
-            .replacingOccurrences(of: "/app", with: "")
-        return Ctx(session: session, appURL: "\(base)/aDISWeb/\(sid)/app", hidden: extractHiddenInputs(html))
+        return Ctx(session: session, appURL: "\(base)/aDISWeb/\(sid)/app", hidden: ADISForm.extractHiddenInputs(html))
     }
 
+    /// `requestCount` is set, not echoed as in `VOEBBSession`: every search runs in a fresh session,
+    /// so the sequence is always 1 (search) → 2 (Vollanzeige). Echo it instead if a crawl ever
+    /// reuses a session for several requests.
     private func search(term: String, ctx: Ctx) async throws -> String {
         var data = ctx.hidden
         data["keyCode"] = "0"
@@ -280,8 +278,7 @@ final class CatalogEnricher {
         data["$Select"] = "Überall suchen"
         data["$Button"] = "pressed"
 
-        let body = data.map { "\(urlEncode($0.key))=\(urlEncode($0.value))" }.joined(separator: "&")
-        return try await ADISHTTP.postRaw(ctx.appURL, body: body, session: ctx.session, referer: "\(base)/aDISWeb/app/prod00")
+        return try await ADISHTTP.postRaw(ctx.appURL, body: ADISForm.encode(data), session: ctx.session, referer: "\(base)/aDISWeb/app/prod00")
     }
 
     /// Downloads the VLB cover (requires UA + aDIS Referer) into `covers/{media_number}.jpg`.
@@ -289,7 +286,7 @@ final class CatalogEnricher {
     private func downloadCover(_ urlString: String, mediaNumber: String, session: URLSession) async -> String? {
         guard let url = URL(string: urlString) else { return nil }
         var req = URLRequest(url: url)
-        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue(ADISForm.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("\(base)/aDISWeb/app", forHTTPHeaderField: "Referer")
         guard let (data, response) = try? await session.data(for: req),
               let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -300,10 +297,4 @@ final class CatalogEnricher {
         let fileURL = ArchiveStore.coversDirectory.appendingPathComponent("\(mediaNumber).jpg")
         do { try data.write(to: fileURL); return fileURL.path } catch { return nil }
     }
-
-    // HTTP primitives: `ADISHTTP` (shared with VOEBBSession; the VÖBB catalog is anonymous).
-
-    // Shared with VOEBBSession via ADISForm.
-    private func extractHiddenInputs(_ html: String) -> [String: String] { ADISForm.extractHiddenInputs(html) }
-    private func urlEncode(_ string: String) -> String { ADISForm.urlEncode(string) }
 }

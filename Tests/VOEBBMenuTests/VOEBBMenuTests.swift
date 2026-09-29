@@ -351,6 +351,16 @@ import Testing
         #expect(ADISForm.attr("<form>", "action") == nil)
     }
 
+    @Test func sessionIDFromFormActionElseTimeoutURL() {
+        #expect(ADISForm.sessionID(in: #"<form action="/aDISWeb/_a1b2/app" method="post">"#) == "_a1b2")
+        #expect(ADISForm.sessionID(in: #"setTimeout(function(){location='/_c3d4/timeout'},9)"#) == "_c3d4")
+        #expect(ADISForm.sessionID(in: "<p>Wartung</p>") == nil)
+    }
+
+    @Test func encodeFormBody() {
+        #expect(ADISForm.encode(["$Select": "Überall suchen"]) == "%24Select=%C3%9Cberall%20suchen")
+    }
+
     @Test func catalogHitPairsCoverWithItsOwnRecord() throws {
         let html = #"<div data-ajax="AK1">no cover</div><div data-ajax="AK2"><img data-src="/vlb/cover/9783551551672/m"></div>"#
         let hit = try #require(HTMLParser.parseCatalogResult(html))

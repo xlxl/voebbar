@@ -176,9 +176,5 @@ struct AccountData {
     var lastUpdated: Date = Date()
     var error: String?
 
-    var nextDueDateString: String? { loans.min(by: { $0.dueDate < $1.dueDate })?.dueDateString }
-
-    var daysUntilNextDue: Int? {
-        loans.map(\.daysUntilDue).filter { $0 >= 0 }.min()
-    }
+    var daysUntilNextDue: Int? { loans.map(\.daysUntilDue).min() }
 }

@@ -123,7 +123,7 @@ enum ToniesAuth {
         var req = URLRequest(url: URL(string: "\(authBase)/token")!)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        req.httpBody = form.map { "\(urlEncode($0.key))=\(urlEncode($0.value))" }.joined(separator: "&").data(using: .utf8)
+        req.httpBody = ADISForm.encode(form).data(using: .utf8)
 
         guard let (data, response) = try? await URLSession.shared.data(for: req) else {
             throw TokenError.transient
@@ -153,11 +153,5 @@ enum ToniesAuth {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-    }
-
-    private static func urlEncode(_ string: String) -> String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        return string.addingPercentEncoding(withAllowedCharacters: allowed) ?? string
     }
 }

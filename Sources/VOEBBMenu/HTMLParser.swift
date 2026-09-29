@@ -3,18 +3,20 @@ import Foundation
 enum HTMLParser {
     // MARK: - Overview Page
 
+    /// Loan count from the overview's service block: "Keine Ausleihen" → 0, "N Ausleihen" → N,
+    /// unrecognizable → nil.
     static func parseLoanCount(_ html: String) -> Int? {
-        // Suche NUR innerhalb des #konto-services Blocks, damit
-        // "Keine Ausleihen" in der Navigationsleiste nicht stört.
-        let servicesHTML = extractKontoServices(html) ?? html
+        serviceCount(html, noneText: "Keine Ausleihen", countPattern: #"(\d+)\s+Ausleihen"#)
+    }
 
-        if servicesHTML.contains("Keine Ausleihen") { return 0 }
-        // Read the capture group, not a split on " " — the whitespace may be a newline, tab or
-        // decoded &nbsp;, and a failed parse here disarms the parse monitor's strongest check.
-        let regex = try! NSRegularExpression(pattern: #"(\d+)\s+Ausleihen"#)
-        guard let m = regex.firstMatch(in: servicesHTML, range: NSRange(servicesHTML.startIndex..., in: servicesHTML)),
-              let r = Range(m.range(at: 1), in: servicesHTML) else { return nil }
-        return Int(servicesHTML[r])
+    /// Searches ONLY inside the #konto-services block, so "Keine Ausleihen" in the navigation bar
+    /// doesn't interfere. Reads the capture group, not a split on " " — the whitespace may be a
+    /// newline, tab or decoded &nbsp;, and a failed parse here disarms the parse monitor's
+    /// strongest check.
+    private static func serviceCount(_ html: String, noneText: String, countPattern: String) -> Int? {
+        let servicesHTML = extractKontoServices(html) ?? html
+        if servicesHTML.contains(noneText) { return 0 }
+        return ADISForm.firstCapture(countPattern, in: servicesHTML).flatMap { Int($0) }
     }
 
     private static func extractKontoServices(_ html: String) -> String? {
@@ -30,61 +32,27 @@ enum HTMLParser {
     // MARK: - Loans Page
 
     static func parseLoans(_ html: String) -> [Loan] {
-        var loans: [Loan] = []
-        let formatter = DateFormatter()
-        formatter.dateFormat = "dd.MM.yyyy"
-        formatter.locale = Locale(identifier: "de_DE")
-
-        // Extract <tr> rows from the rTable_table
-        let trPattern = try! NSRegularExpression(
-            pattern: #"<tr[^>]*class="[^"]*rTable_tr[^"]*"[^>]*>(.*?)</tr>"#,
-            options: [.dotMatchesLineSeparators, .caseInsensitive]
-        )
-        let fullRange = NSRange(html.startIndex..., in: html)
-        let matches = trPattern.matches(in: html, range: fullRange)
-
-        for match in matches {
-            guard let rowRange = Range(match.range(at: 1), in: html) else { continue }
-            let rowHTML = String(html[rowRange])
-
-            guard let loan = parseLoanRow(rowHTML, formatter: formatter) else { continue }
-            loans.append(loan)
-        }
-
-        return loans
+        tableRows(html).compactMap(parseLoanRow)
     }
 
-    private static func parseLoanRow(_ rowHTML: String, formatter: DateFormatter) -> Loan? {
+    private static func parseLoanRow(_ rowHTML: String) -> Loan? {
         // Column order is positional: [0]=checkbox, [1]=date, [2]=library, [3]=title, [4]=status.
         // Cell classes vary (normally rTable_td_text, but red hints like "Keine Verlängerung:
         // Vormerkungen…" use zellef), so extract ALL <td>s instead of filtering by class.
         let cols = extractAllTDContents(rowHTML)
         guard cols.count >= 5 else { return nil }
 
-        let dateStr = stripHTML(cols[1]).trimmingCharacters(in: .whitespaces)
-        guard let dueDate = formatter.date(from: dateStr) else { return nil }
-
-        let library = stripHTML(cols[2]).trimmingCharacters(in: .whitespaces)
+        let dateStr = stripHTML(cols[1])
+        guard let dueDate = germanDate(dateStr) else { return nil }
 
         let parsedTitle = parseTitleColumn(cols[3])
-
-        let status = stripHTML(cols[4]).trimmingCharacters(in: .whitespaces)
-
-        // Checkbox value for renewal
-        let cbPattern = try! NSRegularExpression(
-            pattern: #"value="(CheckCell[^"]*)"#,
-            options: .caseInsensitive
-        )
-        let cbMatch = cbPattern.firstMatch(in: rowHTML, range: NSRange(rowHTML.startIndex..., in: rowHTML))
-        let cbValue = cbMatch.flatMap { Range($0.range(at: 1), in: rowHTML).map { String(rowHTML[$0]) } } ?? ""
-
         return Loan(
             title: parsedTitle.title,
             dueDate: dueDate,
             dueDateString: dateStr,
-            library: library,
-            renewalStatus: status,
-            checkboxValue: cbValue,
+            library: stripHTML(cols[2]),
+            renewalStatus: stripHTML(cols[4]),
+            checkboxValue: checkboxValue(in: rowHTML) ?? "",
             mediaNumber: parsedTitle.mediaNumber,
             signature: parsedTitle.signature,
             mediaType: Loan.inferMediaType(typeTag: parsedTitle.typeTag, signature: parsedTitle.signature)
@@ -96,12 +64,7 @@ enum HTMLParser {
     /// Pickup count from the overview's service block: "Keine Bereitstellungen" → 0,
     /// "1 Bereitstellung" / "2 Bereitstellungen" → n, unrecognizable → nil.
     static func parsePickupCount(_ html: String) -> Int? {
-        let servicesHTML = extractKontoServices(html) ?? html
-        if servicesHTML.contains("Keine Bereitstellungen") { return 0 }
-        let regex = try! NSRegularExpression(pattern: #"(\d+)\s+Bereitstellung"#)
-        guard let m = regex.firstMatch(in: servicesHTML, range: NSRange(servicesHTML.startIndex..., in: servicesHTML)),
-              let r = Range(m.range(at: 1), in: servicesHTML) else { return nil }
-        return Int(servicesHTML[r])
+        serviceCount(html, noneText: "Keine Bereitstellungen", countPattern: #"(\d+)\s+Bereitstellung"#)
     }
 
     /// The pickups list shares its <title> with the loans list ("Meine Ausleihen"); only the
@@ -115,38 +78,26 @@ enum HTMLParser {
     /// Returns [] for any page that isn't recognizably the pickups list.
     static func parsePickups(_ html: String) -> [PickupItem] {
         guard isPickupsPage(html) else { return [] }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "dd.MM.yyyy"
-        formatter.locale = Locale(identifier: "de_DE")
-
-        let trPattern = try! NSRegularExpression(
-            pattern: #"<tr[^>]*class="[^"]*rTable_tr[^"]*"[^>]*>(.*?)</tr>"#,
-            options: [.dotMatchesLineSeparators, .caseInsensitive]
-        )
-        var items: [PickupItem] = []
-        for match in trPattern.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
-            guard let rowRange = Range(match.range(at: 1), in: html) else { continue }
-            let cols = extractAllTDContents(String(html[rowRange]))
-            guard cols.count >= 4 else { continue }
+        return tableRows(html).compactMap { rowHTML in
+            let cols = extractAllTDContents(rowHTML)
+            guard cols.count >= 4 else { return nil }
             let parsedTitle = parseTitleColumn(cols[3])
-            guard !parsedTitle.title.isEmpty else { continue }
-            let dateStr = stripHTML(cols[1]).trimmingCharacters(in: .whitespaces)
-            items.append(PickupItem(
+            guard !parsedTitle.title.isEmpty else { return nil }
+            let dateStr = stripHTML(cols[1])
+            return PickupItem(
                 title: parsedTitle.title,
                 mediaNumber: parsedTitle.mediaNumber,
                 readyUntilString: dateStr,
-                readyUntil: formatter.date(from: dateStr),
-                library: stripHTML(cols[2]).trimmingCharacters(in: .whitespaces)
-            ))
+                readyUntil: germanDate(dateStr),
+                library: stripHTML(cols[2])
+            )
         }
-        return items
     }
 
     /// `name` of the submit button whose label contains `label` (e.g. "Zur Übersicht") — its
     /// `$Button$N` number differs per page, so it is looked up by label, never hardcoded.
     static func findSubmitButton(labelContaining label: String, in html: String) -> String? {
-        let pattern = try! NSRegularExpression(pattern: #"<input[^>]+type=['"]submit['"][^>]*>"#, options: .caseInsensitive)
-        for match in pattern.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+        for match in submitInputRegex.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
             guard let range = Range(match.range, in: html) else { continue }
             let tag = String(html[range])
             guard let value = ADISForm.attr(tag, "value"), value.contains(label),
@@ -155,6 +106,9 @@ enum HTMLParser {
         }
         return nil
     }
+
+    private static let submitInputRegex = try! NSRegularExpression(
+        pattern: #"<input[^>]+type=['"]submit['"][^>]*>"#, options: .caseInsensitive)
 
     /// Account overview: <title> "Mein Konto …" (the lists are titled "Meine Ausleihen") and a
     /// recognizable service block. Checked after "Zur Übersicht" before navigating on from it.
@@ -189,36 +143,13 @@ enum HTMLParser {
     /// then carries an explicit marker in the status cell: "verlängerbar - Stand …"
     /// (renewable) or "nicht verlängerbar : <Grund>- Stand …" (blocked).
     static func parseRenewability(_ html: String) -> [RenewabilityRow] {
-        var rows: [RenewabilityRow] = []
-
-        let trPattern = try! NSRegularExpression(
-            pattern: #"<tr[^>]*class="[^"]*rTable_tr[^"]*"[^>]*>(.*?)</tr>"#,
-            options: [.dotMatchesLineSeparators, .caseInsensitive]
-        )
-        let matches = trPattern.matches(in: html, range: NSRange(html.startIndex..., in: html))
-
-        for match in matches {
-            guard let rowRange = Range(match.range(at: 1), in: html) else { continue }
-            let rowHTML = String(html[rowRange])
-
+        tableRows(html).compactMap { rowHTML in
             // Checkbox value identifies the row for a follow-up submit; skip rows without one.
-            let cbPattern = try! NSRegularExpression(pattern: #"value="(CheckCell[^"]*)"#, options: .caseInsensitive)
-            guard let cbMatch = cbPattern.firstMatch(in: rowHTML, range: NSRange(rowHTML.startIndex..., in: rowHTML)),
-                  let cbRange = Range(cbMatch.range(at: 1), in: rowHTML) else { continue }
-            let checkboxValue = String(rowHTML[cbRange])
-
             // The renewability marker sits in a <b> tag: "verlängerbar …" or "nicht verlängerbar …".
-            let markerPattern = try! NSRegularExpression(
-                pattern: #"<b>\s*((?:nicht\s+)?verlängerbar[^<]*)"#,
-                options: [.caseInsensitive, .dotMatchesLineSeparators]
-            )
-            guard let mMatch = markerPattern.firstMatch(in: rowHTML, range: NSRange(rowHTML.startIndex..., in: rowHTML)),
-                  let mRange = Range(mMatch.range(at: 1), in: rowHTML) else { continue }
-            let marker = stripHTML(String(rowHTML[mRange]))
-            let lower = marker.lowercased()
-
-            // Conservative: only "verlängerbar" without the "nicht" prefix counts as renewable.
-            let renewable = !lower.contains("nicht verlängerbar")
+            guard let checkboxValue = checkboxValue(in: rowHTML),
+                  let rawMarker = ADISForm.firstCapture(#"(?is)<b>\s*((?:nicht\s+)?verlängerbar[^<]*)"#, in: rowHTML)
+            else { return nil }
+            let marker = stripHTML(rawMarker)
 
             // Reason (blocked rows): text after " : ", e.g. "Verlängerung noch nicht möglich- Stand …".
             var reason = ""
@@ -227,17 +158,14 @@ enum HTMLParser {
             }
 
             let cols = extractAllTDContents(rowHTML)
-            let title = cols.count > 3 ? cleanTitleColumn(cols[3]) : ""
-
-            rows.append(RenewabilityRow(
+            return RenewabilityRow(
                 checkboxValue: checkboxValue,
-                title: title,
-                renewable: renewable,
+                title: cols.count > 3 ? parseTitleColumn(cols[3]).title : "",
+                // Conservative: only "verlängerbar" without the "nicht" prefix counts as renewable.
+                renewable: !marker.lowercased().contains("nicht verlängerbar"),
                 reason: reason
-            ))
+            )
         }
-
-        return rows
     }
 
     // MARK: - Catalog (Recherche) — enrichment
@@ -328,11 +256,11 @@ enum HTMLParser {
     }
 
     private static func vollField(_ html: String, _ label: String) -> String {
-        let pattern = "<th[^>]*>\\s*\(NSRegularExpression.escapedPattern(for: label))\\s*</th>\\s*<td[^>]*>(.*?)</td>"
-        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators, .caseInsensitive]),
-              let m = re.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
-              let r = Range(m.range(at: 1), in: html) else { return "" }
-        return stripHTML(String(html[r]))
+        ADISForm.firstCapture("(?is)" + vollFieldPattern(label), in: html).map(stripHTML) ?? ""
+    }
+
+    private static func vollFieldPattern(_ label: String) -> String {
+        "<th[^>]*>\\s*\(NSRegularExpression.escapedPattern(for: label))\\s*</th>\\s*<td[^>]*>(.*?)</td>"
     }
 
     /// Like `vollField`, but collects **every** `<th>label</th><td>…</td>` row and splits each cell
@@ -340,8 +268,7 @@ enum HTMLParser {
     /// `<br>`-separated entries in one cell (co-authors) are all captured. Deduped, non-empty,
     /// joined with `separator`.
     private static func vollFieldAll(_ html: String, _ label: String, join separator: String) -> String {
-        let pattern = "<th[^>]*>\\s*\(NSRegularExpression.escapedPattern(for: label))\\s*</th>\\s*<td[^>]*>(.*?)</td>"
-        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators, .caseInsensitive]) else { return "" }
+        guard let re = try? NSRegularExpression(pattern: vollFieldPattern(label), options: [.dotMatchesLineSeparators, .caseInsensitive]) else { return "" }
         var parts: [String] = []
         for m in re.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
             guard let r = Range(m.range(at: 1), in: html) else { continue }
@@ -356,10 +283,34 @@ enum HTMLParser {
 
     // MARK: - Helpers
 
-    /// Title column: split on <br>, drop leading media-type tags like "[DVD-Video]".
-    static func cleanTitleColumn(_ raw: String) -> String {
-        parseTitleColumn(raw).title
+    /// Inner HTML of every `rTable_tr` row — the row shape shared by the loans list, the pickups
+    /// list and the renewability probe.
+    private static func tableRows(_ html: String) -> [String] {
+        rowRegex.matches(in: html, range: NSRange(html.startIndex..., in: html)).compactMap {
+            Range($0.range(at: 1), in: html).map { String(html[$0]) }
+        }
     }
+
+    private static let rowRegex = try! NSRegularExpression(
+        pattern: #"<tr[^>]*class="[^"]*rTable_tr[^"]*"[^>]*>(.*?)</tr>"#,
+        options: [.dotMatchesLineSeparators, .caseInsensitive]
+    )
+
+    /// The row's renewal checkbox value ("CheckCell…"), only valid inside the aDIS session that
+    /// produced the page.
+    private static func checkboxValue(in rowHTML: String) -> String? {
+        ADISForm.firstCapture(#"(?i)value="(CheckCell[^"]*)""#, in: rowHTML)
+    }
+
+    private static let germanDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "dd.MM.yyyy"
+        f.locale = Locale(identifier: "de_DE")
+        return f
+    }()
+
+    /// "19.09.2026" → local midnight of that day.
+    private static func germanDate(_ s: String) -> Date? { germanDateFormatter.date(from: s) }
 
     /// Full breakdown of the title cell, which is `<br>`-separated:
     /// an optional leading media-type tag "[…]", the title, a shelf signature,
@@ -374,12 +325,8 @@ enum HTMLParser {
             .filter { !$0.isEmpty }
 
         // Leading media-type tag like "[DVD-Video]", "[Gerät (Laptop u.a.)]".
-        let typeTagPattern = try! NSRegularExpression(pattern: #"^\[.+\]$"#)
-        func isTypeTag(_ s: String) -> Bool {
-            typeTagPattern.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
-        }
         var typeTag = ""
-        if let first = parts.first, isTypeTag(first) {
+        if let first = parts.first, first.hasPrefix("["), first.hasSuffix("]"), first.count > 2 {
             typeTag = first
             parts.removeFirst()
         }
@@ -405,23 +352,13 @@ enum HTMLParser {
 
     /// All <td> contents in document order, regardless of class.
     private static func extractAllTDContents(_ html: String) -> [String] {
-        matchAllFirstGroups(#"<td[^>]*>(.*?)</td>"#, in: html)
+        tdRegex.matches(in: html, range: NSRange(html.startIndex..., in: html)).compactMap {
+            Range($0.range(at: 1), in: html).map { String(html[$0]) }
+        }
     }
 
-    private static func matchAllFirstGroups(_ pattern: String, in html: String) -> [String] {
-        var results: [String] = []
-        let regex = try! NSRegularExpression(
-            pattern: pattern,
-            options: [.dotMatchesLineSeparators, .caseInsensitive]
-        )
-        let matches = regex.matches(in: html, range: NSRange(html.startIndex..., in: html))
-        for match in matches {
-            if let range = Range(match.range(at: 1), in: html) {
-                results.append(String(html[range]))
-            }
-        }
-        return results
-    }
+    private static let tdRegex = try! NSRegularExpression(
+        pattern: #"<td[^>]*>(.*?)</td>"#, options: [.dotMatchesLineSeparators, .caseInsensitive])
 
     private static let htmlEntities: [(String, String)] = [
         ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#039;", "'"), ("&apos;", "'"),

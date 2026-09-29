@@ -14,11 +14,19 @@ enum VOEBBError: LocalizedError {
     }
 }
 
-// Per-account scraping session
+/// Per-account scraping session. Stateful and single-use: one instance per operation (refresh,
+/// renewal), never shared between concurrent tasks.
 final class VOEBBSession {
     private let baseURL = "https://www.voebb.de"
     private let session: URLSession
     private let account: LibraryAccount
+
+    /// Session-bound form action every follow-up request posts to; set by `login`.
+    private var appURL = ""
+    /// The page loaded last. Every aDIS page carries a single-use identity token, so each request
+    /// (the logout included) has to start from exactly this page — tracked here instead of being
+    /// threaded through every call.
+    private var currentPage = ""
 
     init(account: LibraryAccount) {
         self.account = account
@@ -32,117 +40,92 @@ final class VOEBBSession {
     static let parseBrokenMarker = "Ausleihen nicht lesbar"
 
     func fetchAccountData(password: String, previousLoanCount: Int? = nil) async throws -> AccountData {
-        let (appURL, overviewHTML) = try await login(password: password)
-        var data = AccountData(account: account)
+        try await withSession(password: password) { overviewHTML in
+            var data = AccountData(account: account)
 
-        // Everything account-level sits in the overview's <dt>/<dd> list — no *SGG navigation.
-        // (Navigating *SGG from the probe result page is silently ignored by aDIS: it returns the
-        // loans page again, and fees read as 0 € for accounts with loans AND fees.)
-        Self.applyAccountInfo(fromOverview: overviewHTML, to: &data)
+            // Everything account-level sits in the overview's <dt>/<dd> list — no *SGG navigation.
+            // (Navigating *SGG from the probe result page is silently ignored by aDIS: it returns the
+            // loans page again, and fees read as 0 € for accounts with loans AND fees.)
+            Self.applyAccountInfo(fromOverview: overviewHTML, to: &data)
 
-        let loanCount = HTMLParser.parseLoanCount(overviewHTML)
-        // Every page carries a new single-use identity token, so the next request (incl. the
-        // logout) always has to start from the page loaded last.
-        var currentHTML = overviewHTML
+            // loanCount == 0  → definitiv keine Ausleihen
+            // loanCount > 0   → Ausleihen vorhanden, Seite abrufen
+            // loanCount == nil → Erkennung unsicher, Ausleihen trotzdem probieren
+            let loanCount = HTMLParser.parseLoanCount(overviewHTML)
+            if loanCount != 0 {
+                let loansHTML = try await navigate("*SZA")
+                var parsed = HTMLParser.parseLoans(loansHTML)
 
-        // loanCount == 0  → definitiv keine Ausleihen
-        // loanCount > 0   → Ausleihen vorhanden, Seite abrufen
-        // loanCount == nil → Erkennung unsicher, Ausleihen trotzdem probieren
-        if loanCount != 0 {
-            let (loansHTML, loansURL) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZA")
-            currentHTML = loansHTML
-            var parsed = HTMLParser.parseLoans(loansHTML)
-
-            // Parse-Monitor: a wrongly empty or short list would make the archive close open
-            // loans as returned — history damage. So it throws instead (see validateLoans).
-            do {
+                // Parse-Monitor: a wrongly empty or short list would make the archive close open
+                // loans as returned — history damage. So it throws instead (see validateLoans).
                 try Self.validateLoans(parsed, expectedCount: loanCount,
                                        previousCount: previousLoanCount, pageHTML: loansHTML)
-            } catch {
-                await logout(appURL: appURL, fromHTML: loansHTML)
-                throw error
-            }
 
-            if !parsed.isEmpty {
-                // Verlängerbarkeit proben ("Markierte Medien verlängerbar?", lesend) und
-                // pro Buch mergen. Fehlertolerant: ohne Probe bleiben die Felder einfach nil.
-                do {
-                    let probe = try await probeRenewability(
-                        appURL: appURL, fromHTML: loansHTML, referer: loansURL,
-                        checkboxValues: parsed.map(\.checkboxValue).filter { !$0.isEmpty }
-                    )
-                    currentHTML = probe.html
-                    let byCheckbox = Dictionary(probe.rows.map { ($0.checkboxValue, $0) },
-                                                uniquingKeysWith: { first, _ in first })
+                // Verlängerbarkeit proben ("Markierte Medien verlängerbar?", lesend) und pro Buch
+                // mergen. Fehlertolerant: ohne Probe bleiben die Felder einfach nil.
+                if !parsed.isEmpty,
+                   let rows = try? await probeRenewability(checkboxValues: parsed.map(\.checkboxValue).filter { !$0.isEmpty }) {
+                    let byCheckbox = Dictionary(rows.map { ($0.checkboxValue, $0) }, uniquingKeysWith: { first, _ in first })
                     for i in parsed.indices {
                         if let s = byCheckbox[parsed[i].checkboxValue] {
                             parsed[i].isRenewable = s.renewable
                             parsed[i].renewalReason = s.reason
                         }
                     }
-                } catch {
-                    // Probe fehlgeschlagen → Ausleihen ohne Verlängerbarkeits-Info anzeigen
                 }
                 data.loans = parsed
             }
-        }
 
-        // Pickups ("Bereitstellungen"), only when the overview announces some. aDIS silently
-        // ignores a list→list navigation (after *SZA, *SZS returns the loans again), so go back
-        // via the page's "Zur Übersicht" button first. Never press anything on the pickups page
-        // itself — it carries "Markierte Medien löschen". Fallback: a fresh session.
-        switch HTMLParser.parsePickupCount(overviewHTML) {
-        case .some(0):
-            data.pickups = []
-        case .some(let expected):
-            var pickups: [PickupItem]?
-            do {
-                let overviewAgain = try await returnToOverview(appURL: appURL, fromHTML: currentHTML)
-                let (html, _) = try await navigate(appURL: appURL, fromHTML: overviewAgain, navCode: "*SZS")
-                currentHTML = html
-                if HTMLParser.isPickupsPage(html) { pickups = HTMLParser.parsePickups(html) }
-            } catch {
-                // Back-navigation or *SZS failed → fresh session below
-            }
-            if pickups == nil {
-                pickups = try? await VOEBBSession(account: account).fetchPickups(password: password)
-            }
-            // A short list would drop pickups from the archive snapshot — treat it as unknown.
-            if let pickups, pickups.count >= expected { data.pickups = pickups }
-        case .none:
-            break  // unknown → archive leaves this account's pickups untouched
+            data.pickups = await readPickups(expected: HTMLParser.parsePickupCount(overviewHTML), password: password)
+            return data
         }
+    }
 
-        await logout(appURL: appURL, fromHTML: currentHTML)
-        data.lastUpdated = Date()
-        return data
+    /// Pickups ("Bereitstellungen"), only when the overview announces some. aDIS silently ignores a
+    /// list→list navigation (after *SZA, *SZS returns the loans again), so go back via the page's
+    /// "Zur Übersicht" button first. Never press anything on the pickups page itself — it carries
+    /// "Markierte Medien löschen". Fallback: a fresh session. nil = unknown (the archive then leaves
+    /// this account's pickups untouched).
+    private func readPickups(expected: Int?, password: String) async -> [PickupItem]? {
+        guard let expected else { return nil }
+        guard expected > 0 else { return [] }
+
+        var pickups: [PickupItem]?
+        if (try? await returnToOverview()) != nil,
+           let html = try? await navigate("*SZS"), HTMLParser.isPickupsPage(html) {
+            pickups = HTMLParser.parsePickups(html)
+        }
+        if pickups == nil {
+            pickups = try? await VOEBBSession(account: account).fetchPickups(password: password)
+        }
+        // A short list would drop pickups from the archive snapshot — treat it as unknown.
+        guard let pickups, pickups.count >= expected else { return nil }
+        return pickups
     }
 
     /// Back to the account overview via the current page's "Zur Übersicht" button (looked up by
-    /// label — its $Button$N differs per page). Returns the page unchanged if it already is the
-    /// overview; throws if there's no such button or the response isn't the overview.
-    private func returnToOverview(appURL: String, fromHTML: String) async throws -> String {
-        if HTMLParser.isOverviewPage(fromHTML) { return fromHTML }
-        guard let button = HTMLParser.findSubmitButton(labelContaining: "Zur Übersicht", in: fromHTML) else {
+    /// label — its $Button$N differs per page). No-op if the current page already is the overview;
+    /// throws if there's no such button or the response isn't the overview.
+    private func returnToOverview() async throws {
+        if HTMLParser.isOverviewPage(currentPage) { return }
+        guard let button = HTMLParser.findSubmitButton(labelContaining: "Zur Übersicht", in: currentPage) else {
             throw VOEBBError.parseError("„Zur Übersicht“-Button nicht gefunden")
         }
-        let html = try await pressButton(appURL: appURL, fromHTML: fromHTML, referer: appURL,
-                                         buttonField: button, focusID: "", checkboxValues: [])
+        let html = try await pressButton(button, focusID: "", checkboxValues: [])
         guard HTMLParser.isOverviewPage(html) else {
             throw VOEBBError.parseError("Rücksprung lieferte keine Kontoübersicht")
         }
-        return html
     }
 
     /// Fallback in a fresh session: login → pickups (*SZS) → logout.
     private func fetchPickups(password: String) async throws -> [PickupItem] {
-        let (appURL, overviewHTML) = try await login(password: password)
-        let (html, _) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZS")
-        await logout(appURL: appURL, fromHTML: html)
-        guard HTMLParser.isPickupsPage(html) else {
-            throw VOEBBError.parseError("Bereitstellungs-Seite nicht erkannt")
+        try await withSession(password: password) { _ in
+            let html = try await navigate("*SZS")
+            guard HTMLParser.isPickupsPage(html) else {
+                throw VOEBBError.parseError("Bereitstellungs-Seite nicht erkannt")
+            }
+            return HTMLParser.parsePickups(html)
         }
-        return HTMLParser.parsePickups(html)
     }
 
     /// Fees, pickup code, card validity and VÖBB's expiry warning from the overview's `<dt>/<dd>`
@@ -189,12 +172,6 @@ final class VOEBBSession {
         }
     }
 
-    /// Ends the aDIS session server-side (nav code *SE). Fire-and-forget: errors are ignored on
-    /// purpose; it only avoids orphaned sessions at VÖBB.
-    private func logout(appURL: String, fromHTML: String) async {
-        _ = try? await navigate(appURL: appURL, fromHTML: fromHTML, navCode: "*SE")
-    }
-
     /// Renews all renewable loans.
     func renewAllLoans(password: String) async throws -> RenewalOutcome {
         try await renewLoans(password: password) { _ in true }
@@ -228,155 +205,108 @@ final class VOEBBSession {
         noMatchMessage: String? = nil,
         selecting select: (Loan) -> Bool
     ) async throws -> RenewalOutcome {
-        let (appURL, overviewHTML) = try await login(password: password)
-
-        let (loansHTML, loansURL) = try await navigate(appURL: appURL, fromHTML: overviewHTML, navCode: "*SZA")
-        let loans = HTMLParser.parseLoans(loansHTML)
-        // An unreadable loans page must not end as "Keine Ausleihen vorhanden".
-        do {
+        try await withSession(password: password) { overviewHTML in
+            let loansHTML = try await navigate("*SZA")
+            let loans = HTMLParser.parseLoans(loansHTML)
+            // An unreadable loans page must not end as "Keine Ausleihen vorhanden".
             try Self.validateLoans(loans, expectedCount: HTMLParser.parseLoanCount(overviewHTML),
                                    previousCount: nil, pageHTML: loansHTML)
-        } catch {
-            await logout(appURL: appURL, fromHTML: loansHTML)
-            throw error
-        }
+            guard !loans.isEmpty else { return RenewalOutcome(specialMessage: "Keine Ausleihen vorhanden") }
 
-        guard !loans.isEmpty else {
-            await logout(appURL: appURL, fromHTML: loansHTML)
-            return RenewalOutcome(specialMessage: "Keine Ausleihen vorhanden")
-        }
+            // Only the selected candidates are probed/renewed — never touch the others.
+            let candidateCheckboxes = loans.filter(select).map(\.checkboxValue).filter { !$0.isEmpty }
+            guard !candidateCheckboxes.isEmpty else { return RenewalOutcome(specialMessage: noMatchMessage) }
 
-        // Only the selected candidates are probed/renewed — never touch the others.
-        let candidateCheckboxes = loans.filter(select).map(\.checkboxValue).filter { !$0.isEmpty }
-        guard !candidateCheckboxes.isEmpty else {
-            await logout(appURL: appURL, fromHTML: loansHTML)
-            return RenewalOutcome(specialMessage: noMatchMessage)
-        }
+            // Step 1: probe "verlängerbar?" ($Button$2) with only the candidates checked. The probe
+            // reports on the marked media; restrict to our candidate set defensively.
+            let candidateSet = Set(candidateCheckboxes)
+            let statuses = try await probeRenewability(checkboxValues: candidateCheckboxes)
+                .filter { candidateSet.contains($0.checkboxValue) }
+            // Every marked row must carry a marker — otherwise the response isn't a probe page
+            // (session error etc.) and the media's state is unknown; don't report "nothing renewed".
+            guard statuses.count == candidateCheckboxes.count else {
+                throw VOEBBError.parseError(
+                    "Verlängerbarkeits-Prüfung nicht lesbar (\(statuses.count) von \(candidateCheckboxes.count) Medien erkannt)"
+                )
+            }
+            let renewable = statuses.filter { $0.renewable }
+            let blocked = statuses.filter { !$0.renewable }
+            guard !renewable.isEmpty else { return RenewalOutcome(blocked: blocked) }
 
-        // Step 1: probe "verlängerbar?" ($Button$2) with only the candidates checked.
-        let probe = try await probeRenewability(
-            appURL: appURL, fromHTML: loansHTML, referer: loansURL,
-            checkboxValues: candidateCheckboxes
-        )
-        // The probe reports on the marked media; restrict to our candidate set defensively.
-        let candidateSet = Set(candidateCheckboxes)
-        let statuses = probe.rows.filter { candidateSet.contains($0.checkboxValue) }
-        // Every marked row must carry a marker — otherwise the response isn't a probe page
-        // (session error etc.) and the media's state is unknown; don't report "nothing renewed".
-        guard statuses.count == candidateCheckboxes.count else {
-            await logout(appURL: appURL, fromHTML: probe.html)
-            throw VOEBBError.parseError(
-                "Verlängerbarkeits-Prüfung nicht lesbar (\(statuses.count) von \(candidateCheckboxes.count) Medien erkannt)"
+            // Step 2: renew only the confirmed-renewable candidates ($Button$1).
+            let resultHTML = try await pressButton("$Button$1", focusID: "$$GFBO_4",
+                                                   checkboxValues: renewable.map(\.checkboxValue))
+
+            // Report success per item from the moved due date on the result page — never infer it
+            // from the probe alone.
+            let verification = RenewalVerifier.verify(
+                submitted: renewable,
+                before: loans,
+                after: HTMLParser.parseLoans(resultHTML)
+            )
+            return RenewalOutcome(
+                renewed: verification.confirmed,
+                blocked: blocked,
+                unconfirmed: verification.unconfirmed,
+                unverifiable: verification.unverifiable
             )
         }
-        let renewable = statuses.filter { $0.renewable }
-        let blocked = statuses.filter { !$0.renewable }
-
-        guard !renewable.isEmpty else {
-            await logout(appURL: appURL, fromHTML: probe.html)
-            return RenewalOutcome(renewed: [], blocked: blocked)
-        }
-
-        // Step 2: renew only the confirmed-renewable candidates ($Button$1).
-        let resultHTML = try await pressButton(
-            appURL: appURL, fromHTML: probe.html, referer: appURL,
-            buttonField: "$Button$1", focusID: "$$GFBO_4",
-            checkboxValues: renewable.map(\.checkboxValue)
-        )
-
-        // Report success per item from the moved due date on the result page — never infer it
-        // from the probe alone.
-        let verification = RenewalVerifier.verify(
-            submitted: renewable,
-            before: loans,
-            after: HTMLParser.parseLoans(resultHTML)
-        )
-
-        await logout(appURL: appURL, fromHTML: resultHTML)
-        return RenewalOutcome(
-            renewed: verification.confirmed,
-            blocked: blocked,
-            unconfirmed: verification.unconfirmed,
-            unverifiable: verification.unverifiable
-        )
     }
 
     /// Presses "Markierte Medien verlängerbar?" ($Button$2, read-only) for the given
     /// checkboxes and parses the per-row renewability markers from the response.
-    private func probeRenewability(
-        appURL: String, fromHTML: String, referer: String,
-        checkboxValues: [String]
-    ) async throws -> (html: String, rows: [RenewabilityRow]) {
-        let html = try await pressButton(
-            appURL: appURL, fromHTML: fromHTML, referer: referer,
-            buttonField: "$Button$2", focusID: "$$GFBO_7",
-            checkboxValues: checkboxValues
-        )
-        return (html, HTMLParser.parseRenewability(html))
+    private func probeRenewability(checkboxValues: [String]) async throws -> [RenewabilityRow] {
+        let html = try await pressButton("$Button$2", focusID: "$$GFBO_7", checkboxValues: checkboxValues)
+        return HTMLParser.parseRenewability(html)
     }
 
-    /// Presses a `$Button$N` submit button (renewal buttons, "Zur Übersicht") by re-POSTing the page's hidden fields plus the
-    /// selected checkboxes. aDISWeb expects duplicate `$RTable_checkbox[]` keys, so the body is
-    /// encoded manually (URLSession can't send duplicate keys via a dictionary).
-    private func pressButton(
-        appURL: String, fromHTML: String, referer: String,
-        buttonField: String, focusID: String,
-        checkboxValues: [String]
-    ) async throws -> String {
-        var postData = extractHiddenInputs(fromHTML)
-        _ = try Self.requiredRequestCount(in: postData)
-        postData["scriptEnabled"] = "true"
-        postData["overrideScrollPos"] = "0"
-        postData["focus"] = focusID
-        postData["source"] = "$B"
-        postData[buttonField] = "pressed"
+    // MARK: - Private: Session lifecycle
 
-        var parts: [String] = []
-        for (k, v) in postData {
-            parts.append("\(urlEncode(k))=\(urlEncode(v))")
+    /// login → `body(overviewHTML)` → logout, the logout on success and on error alike: a parse
+    /// error or a failed request mid-flow must not leave an orphaned session at VÖBB.
+    private func withSession<T>(password: String, _ body: (String) async throws -> T) async throws -> T {
+        let overviewHTML = try await login(password: password)
+        do {
+            let result = try await body(overviewHTML)
+            await logout()
+            return result
+        } catch {
+            await logout()
+            throw error
         }
-        for cbVal in checkboxValues {
-            parts.append("$RTable_checkbox%5B%5D=\(urlEncode(cbVal))")
-        }
-        let body = parts.joined(separator: "&")
-
-        return try await postRaw(url: appURL, body: body, referer: referer)
     }
 
-    // MARK: - Private: Login
+    /// Ends the aDIS session server-side (nav code *SE) from the page loaded last. Best-effort:
+    /// errors are ignored on purpose; it only avoids orphaned sessions at VÖBB.
+    private func logout() async {
+        _ = try? await navigate("*SE")
+    }
 
-    private func login(password: String) async throws -> (appURL: String, overviewHTML: String) {
+    /// Returns the overview page (the landing page after login) and sets `appURL`/`currentPage`.
+    private func login(password: String) async throws -> String {
         // 1. Load main page to get session ID from form action
-        let mainHTML = try await get(url: "\(baseURL)/aDISWeb/app/prod00?sp=SPROD00")
-        guard let sessionMatch = mainHTML.range(of: #"/aDISWeb/(_[a-z0-9]+)/app"#, options: .regularExpression) else {
+        let mainHTML = try await ADISHTTP.get("\(baseURL)/aDISWeb/app/prod00?sp=SPROD00", session: session)
+        guard let sessionID = ADISForm.sessionID(in: mainHTML) else {
             throw VOEBBError.loginFailed("Session-ID nicht gefunden")
         }
-        let sessionMatchStr = String(mainHTML[sessionMatch])
-        guard let sessionIDRange = sessionMatchStr.range(of: #"_[a-z0-9]+"#, options: .regularExpression) else {
-            throw VOEBBError.loginFailed("Session-ID nicht extrahierbar")
-        }
-        let sessionID = String(sessionMatchStr[sessionIDRange])
-        let formActionURL = "\(baseURL)/aDISWeb/\(sessionID)/app"
 
         // 2. POST navigation to account section → triggers OIDC redirect
-        var navData = extractHiddenInputs(mainHTML)
+        var navData = ADISForm.extractHiddenInputs(mainHTML)
         navData["scriptEnabled"] = "true"
         navData["overrideScrollPos"] = "0"
         navData["selected"] = "ZTEXT       *SBK"
         navData["$Select"] = "Überall suchen"
-        _ = try await post(url: formActionURL, data: navData, referer: "\(baseURL)/aDISWeb/app/prod00")
+        _ = try await ADISHTTP.postRaw("\(baseURL)/aDISWeb/\(sessionID)/app", body: ADISForm.encode(navData),
+                                       session: session, referer: "\(baseURL)/aDISWeb/app/prod00")
 
         // 3. POST credentials
-        let loginData: [String: String] = [
+        let loginData = [
             "L#AUSW": account.cardNumber,
             "LPASSW": password,
             "LLOGIN": "Login",
         ]
-        let afterLoginHTML = try await post(
-            url: "\(baseURL)/oidcp/logincheck",
-            data: loginData,
-            referer: "\(baseURL)/oidcp/authorize"
-        )
+        let afterLoginHTML = try await ADISHTTP.postRaw("\(baseURL)/oidcp/logincheck", body: ADISForm.encode(loginData),
+                                                        session: session, referer: "\(baseURL)/oidcp/authorize")
 
         if afterLoginHTML.contains("schiefgegangen") || afterLoginHTML.contains("ausgeschalteten Cookies") {
             throw VOEBBError.loginFailed("Cookie-Problem. Bitte erneut versuchen.")
@@ -387,25 +317,12 @@ final class VOEBBSession {
         }
 
         // Session-ID nach Login: aus der Form-Action, sonst aus der JS-Timeout-URL.
-        let sessionSources = [
-            (#"/aDISWeb/(_[a-z0-9]+)/app"#, #"_[a-z0-9]+"#),
-            (#"/_[a-z0-9]+/timeout"#, #"_[a-z0-9]+"#),
-        ]
-        var newSessionID: String?
-        for (outerPattern, innerPattern) in sessionSources {
-            if let outerRange = afterLoginHTML.range(of: outerPattern, options: .regularExpression) {
-                let outerStr = String(afterLoginHTML[outerRange])
-                if let innerRange = outerStr.range(of: innerPattern, options: .regularExpression) {
-                    newSessionID = String(outerStr[innerRange])
-                    break
-                }
-            }
-        }
-        guard let sid = newSessionID else {
+        guard let sid = ADISForm.sessionID(in: afterLoginHTML) else {
             throw VOEBBError.loginFailed("Session nach Login nicht gefunden")
         }
-        let appURL = "\(baseURL)/aDISWeb/\(sid)/app"
-        return (appURL, afterLoginHTML)
+        appURL = "\(baseURL)/aDISWeb/\(sid)/app"
+        currentPage = afterLoginHTML
+        return afterLoginHTML
     }
 
     // MARK: - Private: Navigation
@@ -423,36 +340,39 @@ final class VOEBBSession {
         return rc
     }
 
-    private func navigate(appURL: String, fromHTML: String, navCode: String) async throws -> (html: String, url: String) {
-        var data = extractHiddenInputs(fromHTML)
-        _ = try Self.requiredRequestCount(in: data)
-        data["scriptEnabled"] = "true"
-        data["overrideScrollPos"] = "0"
-        data["selected"] = "ZTEXT       \(navCode)"
-        data["$Select"] = "Überall suchen"
-
-        let html = try await post(url: appURL, data: data, referer: appURL)
-        return (html, appURL)
+    /// "Changes page" by re-POSTing the current page's form with a nav code (e.g. *SZA = loans).
+    private func navigate(_ navCode: String) async throws -> String {
+        var fields = try followUpFields()
+        fields["selected"] = "ZTEXT       \(navCode)"
+        fields["$Select"] = "Überall suchen"
+        return try await post(ADISForm.encode(fields))
     }
 
-    // MARK: - Private: HTTP
-
-    private func get(url: String) async throws -> String {
-        try await ADISHTTP.get(url, session: session)
+    /// Presses a `$Button$N` submit button (renewal buttons, "Zur Übersicht") by re-POSTing the
+    /// page's hidden fields plus the selected checkboxes. aDISWeb expects duplicate
+    /// `$RTable_checkbox[]` keys, which a dictionary can't hold — so they're appended to the body.
+    private func pressButton(_ buttonField: String, focusID: String, checkboxValues: [String]) async throws -> String {
+        var fields = try followUpFields()
+        fields["focus"] = focusID
+        fields["source"] = "$B"
+        fields[buttonField] = "pressed"
+        let checkboxes = checkboxValues.map { "&$RTable_checkbox%5B%5D=\(ADISForm.urlEncode($0))" }.joined()
+        return try await post(ADISForm.encode(fields) + checkboxes)
     }
 
-    private func post(url: String, data: [String: String], referer: String) async throws -> String {
-        let body = data.map { "\(urlEncode($0.key))=\(urlEncode($0.value))" }.joined(separator: "&")
-        return try await postRaw(url: url, body: body, referer: referer)
+    /// The current page's hidden fields (incl. its echoed `requestCount`) plus the fields every
+    /// aDIS form submit carries.
+    private func followUpFields() throws -> [String: String] {
+        var fields = ADISForm.extractHiddenInputs(currentPage)
+        _ = try Self.requiredRequestCount(in: fields)
+        fields["scriptEnabled"] = "true"
+        fields["overrideScrollPos"] = "0"
+        return fields
     }
 
-    private func postRaw(url: String, body: String, referer: String) async throws -> String {
-        try await ADISHTTP.postRaw(url, body: body, session: session, referer: referer)
+    private func post(_ body: String) async throws -> String {
+        let html = try await ADISHTTP.postRaw(appURL, body: body, session: session, referer: appURL)
+        currentPage = html
+        return html
     }
-
-    // MARK: - Helpers (shared with CatalogEnricher via ADISForm)
-
-    private func extractHiddenInputs(_ html: String) -> [String: String] { ADISForm.extractHiddenInputs(html) }
-
-    private func urlEncode(_ string: String) -> String { ADISForm.urlEncode(string) }
 }

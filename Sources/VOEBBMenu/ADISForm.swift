@@ -13,12 +13,30 @@ enum ADISForm {
         return string.addingPercentEncoding(withAllowedCharacters: allowed) ?? string
     }
 
+    /// `application/x-www-form-urlencoded` body from a field dictionary.
+    static func encode(_ fields: [String: String]) -> String {
+        fields.map { "\(urlEncode($0.key))=\(urlEncode($0.value))" }.joined(separator: "&")
+    }
+
+    /// First capture group of `pattern` in `text`, or nil.
+    static func firstCapture(_ pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let m = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let r = Range(m.range(at: 1), in: text) else { return nil }
+        return String(text[r])
+    }
+
+    /// aDIS session id ("_abc123") from a page's form action (`/aDISWeb/<id>/app`), else from the
+    /// JS timeout URL (`/<id>/timeout`) that the post-login page carries as well.
+    static func sessionID(in html: String) -> String? {
+        firstCapture(#"/aDISWeb/(_[a-z0-9]+)/app"#, in: html) ?? firstCapture(#"/(_[a-z0-9]+)/timeout"#, in: html)
+    }
+
     /// All hidden `<input>` name/value pairs of a page — aDISWeb "navigation" means re-POSTing
     /// these plus a few action fields.
     static func extractHiddenInputs(_ html: String) -> [String: String] {
         var result: [String: String] = [:]
-        let pattern = try! NSRegularExpression(pattern: #"<input[^>]+type=['"]hidden['"][^>]*>"#, options: .caseInsensitive)
-        for match in pattern.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+        for match in hiddenInputRegex.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
             guard let range = Range(match.range, in: html) else { continue }
             let tag = String(html[range])
             guard let name = attr(tag, "name") else { continue }
@@ -26,6 +44,9 @@ enum ADISForm {
         }
         return result
     }
+
+    private static let hiddenInputRegex = try! NSRegularExpression(
+        pattern: #"<input[^>]+type=['"]hidden['"][^>]*>"#, options: .caseInsensitive)
 
     /// Value of one attribute inside a single HTML tag, or nil.
     static func attr(_ tag: String, _ name: String) -> String? {

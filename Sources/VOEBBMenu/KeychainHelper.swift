@@ -12,11 +12,16 @@ enum KeychainHelper {
             kSecAttrAccount as String: cardNumber,
             kSecAttrService as String: "de.voebb.menubar",
         ]
-        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if status == errSecItemNotFound {
             var add = query
             add[kSecValueData as String] = data
-            SecItemAdd(add as CFDictionary, nil)
+            status = SecItemAdd(add as CFDictionary, nil)
+        }
+        // A lost write matters most for the rotating Tonies token: the next refresh would present
+        // the already-consumed one and get disconnected. At least leave a trace.
+        if status != errSecSuccess {
+            NSLog("voebbar keychain: saving an item failed (OSStatus %d)", status)
         }
     }
 
