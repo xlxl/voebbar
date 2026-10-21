@@ -357,6 +357,12 @@ import Testing
         #expect(ADISForm.sessionID(in: "<p>Wartung</p>") == nil)
     }
 
+    @Test func maintenanceRedirectIsRecognized() {
+        #expect(ADISHTTP.isMaintenancePage(URL(string: "https://www.voebb.de/wartung/wartung_www.html?sp=SPROD00")))
+        #expect(!ADISHTTP.isMaintenancePage(URL(string: "https://www.voebb.de/aDISWeb/app/prod00?sp=SPROD00")))
+        #expect(!ADISHTTP.isMaintenancePage(nil))
+    }
+
     @Test func encodeFormBody() {
         #expect(ADISForm.encode(["$Select": "Überall suchen"]) == "%24Select=%C3%9Cberall%20suchen")
     }

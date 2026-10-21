@@ -4,9 +4,11 @@ enum VOEBBError: LocalizedError {
     case loginFailed(String)
     case networkError(String)
     case parseError(String)
+    case maintenance
 
     var errorDescription: String? {
         switch self {
+        case .maintenance: return "VÖBB-Wartung – regulär bis ca. 01:00 Uhr"
         case .loginFailed(let msg): return "Login fehlgeschlagen: \(msg)"
         case .networkError(let msg): return "Netzwerkfehler: \(msg)"
         case .parseError(let msg): return "Fehler beim Lesen: \(msg)"

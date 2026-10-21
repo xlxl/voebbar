@@ -90,6 +90,13 @@ enum ADISHTTP {
         }
     }
 
+    /// During maintenance (regularly every 3rd Wednesday of the month, 21:00 to ~01:00) every
+    /// voebb.de request redirects to a static `/wartung/…` page. Without this check the login
+    /// failed with a misleading "Session-ID nicht gefunden".
+    static func isMaintenancePage(_ url: URL?) -> Bool {
+        url?.path.hasPrefix("/wartung/") ?? false
+    }
+
     private static func request(_ url: String, referer: String) -> URLRequest {
         var req = URLRequest(url: URL(string: url)!)
         req.setValue(ADISForm.userAgent, forHTTPHeaderField: "User-Agent")
@@ -102,6 +109,7 @@ enum ADISHTTP {
     private static func send(_ req: URLRequest, session: URLSession) async throws -> String {
         let (data, response) = try await session.data(for: req)
         try checkHTTP(response)
+        if isMaintenancePage(response.url) { throw VOEBBError.maintenance }
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
     }
 }
