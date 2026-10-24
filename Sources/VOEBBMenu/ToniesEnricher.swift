@@ -162,15 +162,19 @@ final class ToniesEnricher {
     // MARK: - Matching
 
     /// Best-scoring Tonie whose tokens are sufficiently covered by the VÖBB title, or nil.
+    /// Ties on coverage go to the variant with more matched tokens — the more specific Tonie:
+    /// "Toy Story 2" over "Toy Story", "Best of Kleiner Donner" over "Best of Yakari".
     static func bestMatch(for voebbTitle: String, in tonies: [Tonie]) -> Tonie? {
         let haystack = Self.tokens(voebbTitle)
         guard !haystack.isEmpty else { return nil }
+        let head = Self.tokens(Self.headTitle(voebbTitle))
 
-        var best: (tonie: Tonie, score: Double)?
+        var best: (tonie: Tonie, score: Score)?
         for tonie in tonies {
             let seriesTokens = Self.tokens(tonie.series)
             for title in Self.titleVariants(tonie.title) {
-                guard let score = Self.score(series: seriesTokens, title: Self.tokens(title), in: haystack) else { continue }
+                guard let score = Self.score(series: seriesTokens, title: Self.tokens(title),
+                                             in: haystack, head: head) else { continue }
                 if best == nil || score > best!.score {
                     best = (tonie, score)
                 }
@@ -179,25 +183,45 @@ final class ToniesEnricher {
         return best?.tonie
     }
 
+    struct Score: Comparable {
+        let coverage: Double
+        let matched: Int
+        static func < (a: Score, b: Score) -> Bool { (a.coverage, a.matched) < (b.coverage, b.matched) }
+    }
+
     /// Coverage score of one Tonie title variant against the VÖBB tokens, or nil if not confident.
-    static func score(series: Set<String>, title: Set<String>, in haystack: Set<String>) -> Double? {
+    /// `head` are the tokens of the VÖBB head title (see `headTitle`).
+    static func score(series: Set<String>, title: Set<String>, in haystack: Set<String>, head: Set<String>) -> Score? {
         let all = series.union(title)
         guard all.count >= 2 else { return nil }
 
-        let covered = all.intersection(haystack).count
-        let coverage = Double(covered) / Double(all.count)
+        let matched = all.intersection(haystack)
+        // The match must explain at least one real word of the VÖBB head title. Without this anchor
+        // a Tonie could match on the subtitle's boilerplate and the narrators' names alone.
+        guard !matched.subtracting(Self.boilerplate).isDisjoint(with: head) else { return nil }
+
+        let score = Score(coverage: Double(matched.count) / Double(all.count), matched: matched.count)
         // The series is the disambiguator (many episodes share generic words). Require most of
         // it to be present, and strong overall coverage, and ≥2 absolute matched tokens.
         let seriesCoverage = series.isEmpty ? 1.0
             : Double(series.intersection(haystack).count) / Double(series.count)
-        if covered >= 2, coverage >= 0.7, seriesCoverage >= 0.6 { return coverage }
+        if matched.count >= 2, score.coverage >= 0.7, seriesCoverage >= 0.6 { return score }
 
         // VÖBB often catalogues only the episode ("Der Tag, an dem Michel besonders nett sein
         // wollte") without the series tonies.com puts in front ("Michel aus Lönneberga"). An episode
-        // title of ≥3 significant words that is present word for word is distinctive on its own.
-        let episode = title.subtracting(series)
-        if episode.count >= 3, episode.isSubset(of: haystack) { return coverage }
+        // title of ≥3 significant words that is present word for word is distinctive on its own —
+        // but not if those words are boilerplate: "My Little Pony – Das Original-Hörspiel zum Film"
+        // would otherwise claim every "… : das Original-Hörspiel zum Film" (it got Die Eiskönigin 2).
+        let episode = title.subtracting(series).subtracting(Self.boilerplate)
+        if episode.count >= 3, episode.isSubset(of: haystack) { return score }
         return nil
+    }
+
+    /// The VÖBB title up to its subtitle (` : `) or statement of responsibility (` / `) — the part
+    /// that actually names the work.
+    static func headTitle(_ voebbTitle: String) -> String {
+        let cut = [" : ", " / "].compactMap { voebbTitle.range(of: $0)?.lowerBound }.min()
+        return cut.map { String(voebbTitle[..<$0]) } ?? voebbTitle
     }
 
     /// The tonies.com title plus the variants VÖBB is likely to use instead: edition notes in
@@ -214,16 +238,39 @@ final class ToniesEnricher {
         "auf", "von", "mit", "für", "aus", "the", "and", "als", "bei", "ist", "sein", "seine",
     ]
 
+    /// Cataloguing boilerplate shared by many unrelated Tonies ("Das Original-Hörspiel zum Film",
+    /// "… & 3 weitere Geschichten"). Still tokens — they count towards coverage — but they never
+    /// make a match on their own: not as the head-title anchor, not as a distinctive episode.
+    static let boilerplate: Set<String> = [
+        "original", "hörspiel", "hörspiele", "hörbuch", "film", "kinofilm", "serie", "folge", "teil",
+        "weitere", "geschichten", "lieder", "büchern", "buch",
+    ]
+
+    private static let romanNumerals = ["ii": "2", "iii": "3", "iv": "4"]
+
     /// Significant lowercased tokens: split on non-alphanumerics (keeps umlaut words intact), drop
-    /// stopwords and very short fragments (`&`, `3`, `du`, …) that carry no matching signal.
+    /// stopwords and very short fragments (`&`, `du`, …) that carry no matching signal.
     /// Apostrophes are removed *before* splitting so a genitive-s lines up across sources
     /// (tonies.com `Leo's` → `leos` = VÖBB's `Leos`, instead of splitting into `leo` + `s`).
+    /// Numbers are kept (leading zeros dropped, `II`–`IV` as digits): they are what tells sequels
+    /// and volumes apart ("Die Eiskönigin 2" / series "Die Eiskönigin II", "Unter meinem Bett 4").
+    /// Four-digit numbers are years ("Neuauflage 2022") and dropped.
     static func tokens(_ s: String) -> Set<String> {
         let cleaned = s.lowercased()
             .replacingOccurrences(of: "'", with: "")
             .replacingOccurrences(of: "’", with: "")
-        let parts = cleaned.components(separatedBy: CharacterSet.alphanumerics.inverted)
-        return Set(parts.filter { $0.count >= 3 && !stopwords.contains($0) && !$0.allSatisfy(\.isNumber) })
+        var out = Set<String>()
+        for part in cleaned.components(separatedBy: CharacterSet.alphanumerics.inverted) {
+            if let roman = romanNumerals[part] {
+                out.insert(roman)
+            } else if !part.isEmpty, part.allSatisfy(\.isASCII), part.allSatisfy(\.isNumber) {
+                let number = String(part.drop { $0 == "0" })
+                if (1...3).contains(number.count) { out.insert(number) }
+            } else if part.count >= 3, !stopwords.contains(part), !part.allSatisfy(\.isNumber) {
+                out.insert(part)
+            }
+        }
+        return out
     }
 
     // MARK: - Image download

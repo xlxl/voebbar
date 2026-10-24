@@ -399,7 +399,13 @@ import Testing
 
     @Test func apostropheLinesUpWithVOEBBGenitive() {
         #expect(ToniesEnricher.tokens("Leo's Tag").contains("leos"))
-        #expect(ToniesEnricher.tokens("Der, die & das 3 du").isEmpty)   // stopwords, short, digits
+        #expect(ToniesEnricher.tokens("Der, die & das du").isEmpty)   // stopwords, short
+    }
+
+    @Test func numbersAreTokensButYearsAreNot() {
+        #expect(ToniesEnricher.tokens("Die Eiskönigin II") == ["eiskönigin", "2"])
+        #expect(ToniesEnricher.tokens("Hörspiel zur TV-Serie 04").contains("4"))
+        #expect(!ToniesEnricher.tokens("Neuauflage 2022").contains("2022"))
     }
 
     @Test func titleVariants() {
@@ -420,6 +426,36 @@ import Testing
         let pool = [T(title: "Kindischer Ozean", series: "Willy Astor", imageUrl: "other"),
                     T(title: title, series: series, imageUrl: "hit")]
         #expect(ToniesEnricher.bestMatch(for: voebb, in: pool)?.imageUrl == "hit")
+    }
+
+    // 2026-10-24: "My Little Pony – Das Original-Hörspiel zum Film" took Die Eiskönigin 2 via the
+    // episode rule on {original, hörspiel, film} alone, while the real Tonie couldn't match at all
+    // because "2" and "II" were dropped as tokens.
+    @Test func boilerplateEpisodeDoesNotMatchAndSequelNumberDoes() {
+        let voebb = "Die Eiskönigin 2 : das Original-Hörspiel zum Film / Matthias Keller [Erzähler/in] ; Hape Kerkeling [Erzähler/in]"
+        let pony = T(title: "My Little Pony - Das Original-Hörspiel zum Film", series: "My Little Pony", imageUrl: "pony")
+        #expect(ToniesEnricher.bestMatch(for: voebb, in: [pony]) == nil)
+        let pool = [pony,
+                    T(title: "Die Eiskönigin", series: "Die Eiskönigin – Völlig unverfroren", imageUrl: "frozen1"),
+                    T(title: "Die Eiskönigin 2", series: "Die Eiskönigin II", imageUrl: "frozen2")]
+        #expect(ToniesEnricher.bestMatch(for: voebb, in: pool)?.imageUrl == "frozen2")
+    }
+
+    @Test func moreSpecificTonieWinsATie() {
+        let pool = [T(title: "Toy Story", series: "Toy Story", imageUrl: "1"),
+                    T(title: "Toy Story 2", series: "Toy Story", imageUrl: "2")]
+        #expect(ToniesEnricher.bestMatch(for: "Toy Story 2 : das Original-Hörspiel zum Film / X", in: pool)?.imageUrl == "2")
+        let yakari = [T(title: "Best of Yakari", series: "Yakari", imageUrl: "best"),
+                      T(title: "Best of Kleiner Donner", series: "Yakari", imageUrl: "donner")]
+        #expect(ToniesEnricher.bestMatch(for: "Yakari : das Original-Hörspiel zur TV-Serie - Best of Kleiner Donner / X",
+                                         in: yakari)?.imageUrl == "donner")
+    }
+
+    @Test func matchNeedsAWordOfTheHeadTitle() {
+        // Everything after " / " is narrators — a Tonie named after one of them is no match.
+        let pool = [T(title: "Hape Kerkeling", series: "", imageUrl: "x")]
+        #expect(ToniesEnricher.bestMatch(for: "Die Eiskönigin 2 : Hörspiel / Hape Kerkeling [Erzähler/in]", in: pool) == nil)
+        #expect(ToniesEnricher.headTitle("Räuber Ratte : mit Liedern / Julia Donaldson") == "Räuber Ratte")
     }
 
     @Test func sameSeriesDifferentEpisodeDoesNotMatch() {

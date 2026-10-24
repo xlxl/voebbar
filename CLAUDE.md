@@ -94,7 +94,10 @@ entire contract.
   - **`ToniesEnricher`** — Tonie cover images from **my.tonies.com** (GraphQL, OAuth via
     `ToniesAuth`, one call per refresh). The Tonie chip id is unrelated to the VÖBB barcode, so the
     only join is a **fuzzy title-token match** (`ToniesEnricher.tokens` / `bestMatch`, confident hits
-    only; unmatched candidates are *not* locked as notfound). Sets `source='tonie'`. A few Tonies
+    only; unmatched candidates are *not* locked as notfound). Guards against wrong images: numbers
+    are tokens (`II` → `2`) so sequels differ, `boilerplate` words ("Original-Hörspiel zum Film")
+    never carry a match alone, a match must hit a word of the VÖBB head title (before ` : ` / ` / `),
+    and coverage ties go to the Tonie with more matched tokens. Sets `source='tonie'`. A few Tonies
     ship as a flattened product photo on white instead of the usual transparent render; when a
     downloaded cover has no alpha channel, `removeBackgroundIfFlattened` lifts the subject via Vision
     (`VNGenerateForegroundInstanceMaskRequest`, macOS 14+, best-effort) so it matches the rest.
