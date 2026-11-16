@@ -35,9 +35,15 @@ final class ArchiveStore {
 
     private let queue = DispatchQueue(label: "de.voebb.menubar.archive")
     private var db: OpaquePointer?
+    private let databaseURL: URL
 
-    private init() {
+    init(databaseURL: URL = ArchiveStore.databaseURL) {
+        self.databaseURL = databaseURL
         queue.sync { open() }
+    }
+
+    deinit {
+        sqlite3_close(db)
     }
 
     // MARK: - Public API
@@ -46,9 +52,9 @@ final class ArchiveStore {
     /// Accounts with a fetch error are skipped entirely (never treated as "all returned").
     /// One transaction for the whole refresh, so Fundus never reads a half-written state (e.g. a
     /// loan already closed as returned while its renewed successor isn't inserted yet).
-    func record(_ results: [AccountData]) {
+    func record(_ results: [AccountData], now date: Date = Date()) {
         onQueue(()) {
-            let now = Self.iso8601(Date())
+            let now = Self.iso8601(date)
             exec("BEGIN;")
             for data in results where data.error == nil {
                 recordAccount(data, now: now)
@@ -60,7 +66,7 @@ final class ArchiveStore {
     // MARK: - Setup
 
     private func open() {
-        let url = Self.databaseURL
+        let url = databaseURL
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
         guard sqlite3_open(url.path, &db) == SQLITE_OK else {
@@ -164,14 +170,19 @@ final class ArchiveStore {
     private func recordAccount(_ data: AccountData, now: String) {
         let card = data.account.cardNumber
         var seenKeys = Set<String>()
+        // One read of the account's open events up front. Several open rows under one key should
+        // not exist; then the lowest id is the one updated (the old `LIMIT 1` was unordered).
+        let initialOpen = query("SELECT id, media_number FROM borrow_events WHERE account_card=? AND is_open=1 ORDER BY id;",
+                                card, row: { (id: sqlite3_column_int64($0, 0), key: self.col($0, 1)) })
+        var openIDs: [String: Int64] = [:]
+        for event in initialOpen where openIDs[event.key] == nil { openIDs[event.key] = event.id }
 
         for loan in data.loans {
             let key = Self.identity(mediaNumber: loan.mediaNumber, title: loan.title, library: loan.library)
             seenKeys.insert(key)
             let dueDate = Self.isoDay(fromGerman: loan.dueDateString)
 
-            if let id = query("SELECT id FROM borrow_events WHERE account_card=? AND media_number=? AND is_open=1 LIMIT 1;",
-                              card, key, row: { sqlite3_column_int64($0, 0) }).first {
+            if let id = openIDs[key] {
                 // signature/media_type/library follow the page too (media_type feeds the Tonie
                 // gate), but an empty parse never blanks a value we already have.
                 run("""
@@ -182,20 +193,21 @@ final class ArchiveStore {
                     WHERE id=?;
                     """, now, dueDate, loan.title, loan.signature, loan.mediaType, loan.library, id)
             } else {
-                run("""
+                let inserted = run("""
                     INSERT INTO borrow_events
                         (account_card, account_name, media_number, title, signature, media_type, library,
                          first_seen, last_seen, due_date, is_open)
                     VALUES (?,?,?,?,?,?,?,?,?,?,1);
                     """, card, data.account.name, key, loan.title, loan.signature, loan.mediaType,
                     loan.library, now, now, dueDate)
+                // A second loan with the same identity in this refresh updates this row. Only
+                // after a successful insert: on failure the rowid still names an older row.
+                if inserted { openIDs[key] = sqlite3_last_insert_rowid(db) }
             }
         }
 
         // Reconcile returns: open events of this account no longer present → returned.
-        let openEvents = query("SELECT id, media_number FROM borrow_events WHERE account_card=? AND is_open=1;",
-                               card, row: { (id: sqlite3_column_int64($0, 0), key: self.col($0, 1)) })
-        for event in openEvents where !seenKeys.contains(event.key) {
+        for event in initialOpen where !seenKeys.contains(event.key) {
             run("UPDATE borrow_events SET is_open=0, returned_at=? WHERE id=?;", now, event.id)
         }
 
@@ -484,11 +496,13 @@ final class ArchiveStore {
         return stmt
     }
 
-    /// Executes a single write statement.
-    private func run(_ sql: String, _ args: Any...) {
-        guard let stmt = prepare(sql, args) else { return }
+    /// Executes a single write statement; false when it failed (already logged).
+    @discardableResult
+    private func run(_ sql: String, _ args: Any...) -> Bool {
+        guard let stmt = prepare(sql, args) else { return false }
         defer { sqlite3_finalize(stmt) }
-        if sqlite3_step(stmt) != SQLITE_DONE { logError(sql) }
+        guard sqlite3_step(stmt) == SQLITE_DONE else { logError(sql); return false }
+        return true
     }
 
     /// Executes a query and maps every result row.
