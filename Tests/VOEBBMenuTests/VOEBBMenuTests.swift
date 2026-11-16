@@ -462,6 +462,22 @@ import Testing
         let pool = [T(title: "Rock'n Rarrr Music", series: "Heavysaurus", imageUrl: "x")]
         #expect(ToniesEnricher.bestMatch(for: "Heavysaurus - Pommesgabel : Best of Dino Metal / X", in: pool) == nil)
     }
+
+    // VÖBB folds the series noun into the episode ("Halloween- & Spuklieder"); tonies.com keeps it
+    // in the series ("Lieblings-Kinderlieder" – "Halloween & Spuk").
+    @Test func episodeWithSeriesNounFoldedInMatches() {
+        let pool = [T(title: "Halloween & Spuk", series: "Lieblings-Kinderlieder", imageUrl: "hit"),
+                    T(title: "Weihnachtslieder", series: "Lieblings-Kinderlieder", imageUrl: "xmas")]
+        #expect(ToniesEnricher.bestMatch(for: "Halloween- & Spuklieder / Kay Poppe [Komponist/in] ; Bastian Pusch [Komponist/in]",
+                                         in: pool)?.imageUrl == "hit")
+    }
+
+    @Test func foldedEpisodeNeedsTheWholeHeadTitle() {
+        let pool = [T(title: "Halloween & Spuk", series: "Lieblings-Kinderlieder", imageUrl: "x")]
+        // An extra head word the Tonie doesn't explain, or a compound tail the series doesn't end in.
+        #expect(ToniesEnricher.bestMatch(for: "Halloween- & Spuklieder für Erwachsene / X", in: pool) == nil)
+        #expect(ToniesEnricher.bestMatch(for: "Halloween & Spukschloss / X", in: pool) == nil)
+    }
 }
 
 // MARK: - Catalog title search terms

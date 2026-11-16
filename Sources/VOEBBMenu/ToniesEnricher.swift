@@ -214,7 +214,29 @@ final class ToniesEnricher {
         // would otherwise claim every "… : das Original-Hörspiel zum Film" (it got Die Eiskönigin 2).
         let episode = title.subtracting(series).subtracting(Self.boilerplate)
         if episode.count >= 3, episode.isSubset(of: haystack) { return score }
+
+        // A shorter episode counts only when it *is* the VÖBB head title. VÖBB tends to fold the
+        // series' noun into the episode words: "Halloween- & Spuklieder" for "Lieblings-Kinderlieder"
+        // – "Halloween & Spuk". So every head word must be an episode word, as is or as a compound of
+        // an episode word and a word the series ends in ("spuk"+"lieder" ← "kinderlieder"), and every
+        // episode word must be used.
+        if episode.count >= 2, Self.headIsEpisode(head: head, episode: episode, series: series) { return score }
         return nil
+    }
+
+    static func headIsEpisode(head: Set<String>, episode: Set<String>, series: Set<String>) -> Bool {
+        guard !head.isEmpty else { return false }
+        var used = Set<String>()
+        for word in head {
+            if episode.contains(word) { used.insert(word); continue }
+            guard let stem = episode.first(where: { stem in
+                guard stem.count >= 4, word.hasPrefix(stem) else { return false }
+                let tail = String(word.dropFirst(stem.count))
+                return tail.count >= 4 && series.contains { $0.hasSuffix(tail) }
+            }) else { return false }
+            used.insert(stem)
+        }
+        return used == episode
     }
 
     /// The VÖBB title up to its subtitle (` : `) or statement of responsibility (` / `) — the part
