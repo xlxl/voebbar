@@ -56,21 +56,6 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <true/>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsArbitraryLoads</key>
-        <false/>
-        <key>NSExceptionDomains</key>
-        <dict>
-            <key>voebb.de</key>
-            <dict>
-                <key>NSIncludesSubdomains</key>
-                <true/>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <false/>
-            </dict>
-        </dict>
-    </dict>
 </dict>
 </plist>
 PLIST

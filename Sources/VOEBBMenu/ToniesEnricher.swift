@@ -40,8 +40,7 @@ final class ToniesEnricher {
 
         try? FileManager.default.createDirectory(at: ArchiveStore.coversDirectory, withIntermediateDirectories: true)
 
-        if ToniesAuth.isConnected,
-           let token = await ToniesAuth.freshAccessToken(),   // nil: not/no-longer connected
+        if let token = await ToniesAuth.freshAccessToken(),   // nil: not/no-longer connected
            let tonies = await fetchCollection(accessToken: token), !tonies.isEmpty {
             targets = await fill(targets, from: tonies, phase: "Tonie-Bilder")
         }
@@ -65,7 +64,7 @@ final class ToniesEnricher {
                 unmatched.append(target)
                 continue
             }
-            ArchiveStore.shared.upsertToniImage(mediaNumber: target.mediaNumber, coverPath: path)
+            ArchiveStore.shared.upsertTonieImage(mediaNumber: target.mediaNumber, coverPath: path)
         }
         return unmatched
     }
@@ -300,18 +299,8 @@ final class ToniesEnricher {
     /// Downloads the public 530×530 Tonie PNG into `covers/{media_number}.jpg` (extension is
     /// irrelevant — the archive app decodes by content). Returns nil on any non-image response.
     private func downloadImage(_ urlString: String, mediaNumber: String) async -> String? {
-        guard let url = URL(string: urlString) else { return nil }
-        var req = URLRequest(url: url)
-        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("https://my.tonies.com/", forHTTPHeaderField: "Referer")
-        guard let (data, response) = try? await URLSession.shared.data(for: req),
-              let http = response as? HTTPURLResponse, http.statusCode == 200,
-              (http.value(forHTTPHeaderField: "Content-Type") ?? "").hasPrefix("image/"),
-              !data.isEmpty else {
-            return nil
-        }
-        let fileURL = ArchiveStore.coversDirectory.appendingPathComponent("\(mediaNumber).jpg")
-        do { try data.write(to: fileURL) } catch { return nil }
+        guard let fileURL = await CoverCache.download(urlString, mediaNumber: mediaNumber, session: .shared,
+                                                      referer: "https://my.tonies.com/") else { return nil }
         removeBackgroundIfFlattened(at: fileURL)
         squareToMyToniesFrame(at: fileURL)
         return fileURL.path

@@ -20,8 +20,8 @@ enum HTMLParser {
     }
 
     private static func extractKontoServices(_ html: String) -> String? {
-        guard let start = html.range(of: #"id="konto-services""#, options: .regularExpression) else { return nil }
-        // Suche das Ende des Blocks: </section> oder </div> nach dem Start
+        guard let start = html.range(of: "id=\"konto-services\"") else { return nil }
+        // Ende des Blocks: das nächste </section>, sonst die ersten 2000 Zeichen
         let tail = html[start.lowerBound...]
         if let end = tail.range(of: "</section>") {
             return String(tail[tail.startIndex..<end.upperBound])
@@ -51,7 +51,6 @@ enum HTMLParser {
             dueDate: dueDate,
             dueDateString: dateStr,
             library: stripHTML(cols[2]),
-            renewalStatus: stripHTML(cols[4]),
             checkboxValue: checkboxValue(in: rowHTML) ?? "",
             mediaNumber: parsedTitle.mediaNumber,
             signature: parsedTitle.signature,
@@ -176,6 +175,8 @@ enum HTMLParser {
         let recordID: String
     }
 
+    private static let idRegex = try! NSRegularExpression(pattern: #"data-ajax="([A-Z0-9]+)""#)
+
     /// From a Trefferliste: the first cover-bearing result's ISBN + VLB cover URL (the cover
     /// `<img>` carries the ISBN in its `data-src`) and that SAME record's id (`data-ajax`, for the
     /// optional Vollanzeige). Returns nil when the search yields no ISBN-bearing result.
@@ -191,10 +192,9 @@ enum HTMLParser {
         // cover with a different record's Vollanzeige. Nearest id before the cover wins (each
         // hit's container precedes its cover image), else the first one after, else none.
         var recordID = ""
-        let idRegex = try! NSRegularExpression(pattern: #"data-ajax="([A-Z0-9]+)""#)
         var lastBefore: String?
         var firstAfter: String?
-        for m in idRegex.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+        for m in Self.idRegex.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
             guard let whole = Range(m.range, in: html), let value = Range(m.range(at: 1), in: html) else { continue }
             if whole.lowerBound < isbnRange.lowerBound {
                 lastBefore = String(html[value])
@@ -259,6 +259,11 @@ enum HTMLParser {
         ADISForm.firstCapture("(?is)" + vollFieldPattern(label), in: html).map(stripHTML) ?? ""
     }
 
+    private static func splitOnBR(_ s: String) -> [String] {
+        s.replacingOccurrences(of: #"(?i)<br\s*/?>"#, with: "\u{1}", options: .regularExpression)
+            .components(separatedBy: "\u{1}")
+    }
+
     private static func vollFieldPattern(_ label: String) -> String {
         "<th[^>]*>\\s*\(NSRegularExpression.escapedPattern(for: label))\\s*</th>\\s*<td[^>]*>(.*?)</td>"
     }
@@ -272,8 +277,7 @@ enum HTMLParser {
         var parts: [String] = []
         for m in re.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
             guard let r = Range(m.range(at: 1), in: html) else { continue }
-            let cell = String(html[r]).replacingOccurrences(of: #"(?i)<br\s*/?>"#, with: "\u{1}", options: .regularExpression)
-            for piece in cell.components(separatedBy: "\u{1}") {
+            for piece in splitOnBR(String(html[r])) {
                 let clean = stripHTML(piece)
                 if !clean.isEmpty, !parts.contains(clean) { parts.append(clean) }
             }
@@ -318,9 +322,7 @@ enum HTMLParser {
     static func parseTitleColumn(_ raw: String) -> (title: String, signature: String, mediaNumber: String, typeTag: String) {
         // Any <br> spelling (`<br/>`, `<BR />` …), like `vollFieldAll` — a literal split would fuse
         // title, signature and barcode into one part and lose the item's archive identity.
-        var parts = raw
-            .replacingOccurrences(of: #"(?i)<br\s*/?>"#, with: "\u{1}", options: .regularExpression)
-            .components(separatedBy: "\u{1}")
+        var parts = splitOnBR(raw)
             .map { stripHTML($0).trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "¬", with: "") }
             .filter { !$0.isEmpty }
 
@@ -383,13 +385,14 @@ enum HTMLParser {
         return result.trimmingCharacters(in: .whitespaces)
     }
 
+    private static let numericEntityRegex = try! NSRegularExpression(pattern: #"&#(x[0-9a-fA-F]+|\d+);"#)
+
     /// Replaces decimal (`&#8222;`) and hex (`&#x201E;`) character references with their characters.
     private static func decodeNumericEntities(_ s: String) -> String {
         guard s.contains("&#") else { return s }
-        let regex = try! NSRegularExpression(pattern: #"&#(x[0-9a-fA-F]+|\d+);"#)
         var out = ""
         var cursor = s.startIndex
-        for m in regex.matches(in: s, range: NSRange(s.startIndex..., in: s)) {
+        for m in numericEntityRegex.matches(in: s, range: NSRange(s.startIndex..., in: s)) {
             guard let whole = Range(m.range, in: s), let numRange = Range(m.range(at: 1), in: s) else { continue }
             let num = s[numRange]
             let value = num.hasPrefix("x") ? UInt32(num.dropFirst(), radix: 16) : UInt32(num)

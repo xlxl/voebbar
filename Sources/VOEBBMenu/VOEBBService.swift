@@ -134,18 +134,20 @@ final class VOEBBSession {
     /// list. A missing fees row counts as 0 € only when the page is recognizably the overview
     /// (other terms present); otherwise `feesUnknown` is set instead of silently reporting 0.
     static func applyAccountInfo(fromOverview html: String, to data: inout AccountData) {
+        let pickupCode = HTMLParser.parseAccountInfo(html, term: "Abholcode")
+        let cardValidUntil = HTMLParser.parseAccountInfo(html, term: "Ausweis gültig bis")
         if let raw = HTMLParser.parseAccountInfo(html, term: "Fällige Gebühren"),
            let amount = HTMLParser.parseAmount(raw) {
             data.fees = amount
         } else if HTMLParser.parseAccountInfo(html, term: "Kontostand vom:") != nil
-                    || HTMLParser.parseAccountInfo(html, term: "Abholcode") != nil
-                    || HTMLParser.parseAccountInfo(html, term: "Ausweis gültig bis") != nil {
+                    || pickupCode != nil
+                    || cardValidUntil != nil {
             data.fees = 0
         } else {
             data.feesUnknown = true
         }
-        data.pickupCode = HTMLParser.parseAccountInfo(html, term: "Abholcode")
-        data.cardValidUntil = HTMLParser.parseAccountInfo(html, term: "Ausweis gültig bis") ?? ""
+        data.pickupCode = pickupCode
+        data.cardValidUntil = cardValidUntil ?? ""
         data.cardExpiryWarning = HTMLParser.parseAccountInfo(html, term: "Achtung")
     }
 

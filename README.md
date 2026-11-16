@@ -22,7 +22,8 @@ nie in UserDefaults.
 
 `build_app.sh` startet die App bewusst immer vom **selben** Pfad (`/Applications/VOEBBMenu.app`,
 via `DEPLOY_DIR` änderbar) und löscht die Kopie im Repo: Die Schlüsselbund-Freigabe („Immer
-erlauben") hängt nicht nur an der Signatur (`VOEBBMenu Dev`), sondern auch am Startpfad — ein aus
+erlauben") hängt nicht nur an der Signatur (Apple-Development-Zertifikat mit Team-ID, Fallback
+`VOEBBMenu Dev`), sondern auch am Startpfad — ein aus
 dem Repo gestartetes Bundle gilt als andere App und fragt erneut nach den gespeicherten Passwörtern.
 
 ## Funktionen

@@ -32,19 +32,12 @@ final class StatusBarController: NSObject {
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
-        setupButton()
+        statusItem.button?.imagePosition = .imageLeft
         updateButton()
         EnrichmentProgress.shared.onChange = { [weak self] in self?.updateEnrichmentUI() }
     }
 
     // MARK: - Setup
-
-    private func setupButton() {
-        guard let button = statusItem.button else { return }
-        button.image = NSImage(systemSymbolName: "books.vertical", accessibilityDescription: "VÖBB")
-        button.image?.isTemplate = true
-        button.imagePosition = .imageLeft
-    }
 
     func startRefreshing() {
         refresh()
@@ -196,7 +189,7 @@ final class StatusBarController: NSObject {
             lead: "Es \(loanPhrase(loans.count)) zur Verlängerung eingereicht.",
             loans: loans,
             line: multipleAccounts
-                ? { "• \(self.truncate($0.title, to: 40)) – \(accountOf[$0.renewalKey] ?? "") (bis \($0.dueDateString))" }
+                ? { "• \(self.truncate($0.title, to: Self.maxTitleLength)) – \(accountOf[$0.renewalKey] ?? "") (bis \($0.dueDateString))" }
                 : nil)
 
         // Gruppiert nach Konto: pro Konto ein Login, alle Schlüssel dieses Kontos in einem Durchlauf.
@@ -394,7 +387,7 @@ final class StatusBarController: NSObject {
         if soon > 0 { titleParts.append("\(soon) bald fällig") }
         let title = titleParts.joined(separator: " · ")
 
-        var lines = due.prefix(4).map { "• \(truncate($0.title, to: 40)) (bis \($0.dueDateString))" }
+        var lines = due.prefix(4).map { "• \(truncate($0.title, to: Self.maxTitleLength)) (bis \($0.dueDateString))" }
         if due.count > 4 { lines.append("… und \(due.count - 4) weitere") }
         NotificationManager.shared.notify(title: title, body: lines.joined(separator: "\n"))
     }
@@ -709,17 +702,18 @@ final class StatusBarController: NSObject {
         }
     }
 
+    private func accountData(for sender: NSMenuItem) -> AccountData? {
+        guard let cardNumber = sender.representedObject as? String else { return nil }
+        return currentData.first(where: { $0.account.cardNumber == cardNumber })
+    }
+
     @objc private func onRenew(_ sender: NSMenuItem) {
-        guard let cardNumber = sender.representedObject as? String,
-              let data = currentData.first(where: { $0.account.cardNumber == cardNumber })
-        else { return }
+        guard let data = accountData(for: sender) else { return }
         renewAll(for: data)
     }
 
     @objc private func onRenewDue(_ sender: NSMenuItem) {
-        guard let cardNumber = sender.representedObject as? String,
-              let data = currentData.first(where: { $0.account.cardNumber == cardNumber })
-        else { return }
+        guard let data = accountData(for: sender) else { return }
         renewDueSoon(for: data)
     }
 }

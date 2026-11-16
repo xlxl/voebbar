@@ -80,7 +80,8 @@ import Testing
 
     @Test func zellefStatusCellStillCounts() {
         let loans = HTMLParser.parseLoans(row(#"<td class="zellef">Keine Verlängerung: Vormerkungen</td>"#))
-        #expect(loans.first?.renewalStatus == "Keine Verlängerung: Vormerkungen")
+        #expect(loans.count == 1)
+        #expect(loans.first?.title == "Findet Nemo")
     }
 }
 
@@ -160,7 +161,7 @@ import Testing
 @Suite struct ValidateLoansTests {
     static func loans(_ n: Int) -> [Loan] {
         (0..<n).map { Loan(title: "T\($0)", dueDate: Date(), dueDateString: "", library: "B",
-                          renewalStatus: "", checkboxValue: "c\($0)") }
+                          checkboxValue: "c\($0)") }
     }
 
     @Test func overviewSaysNoneIsFine() throws {
@@ -229,7 +230,7 @@ import Testing
 
     private func loan(_ title: String, due day: Int, cb: String, library: String = "Bib", barcode: String = "") -> Loan {
         Loan(title: title, dueDate: date(day), dueDateString: "\(day).10.2026", library: library,
-             renewalStatus: "", checkboxValue: cb, mediaNumber: barcode)
+             checkboxValue: cb, mediaNumber: barcode)
     }
 
     private func row(_ title: String, cb: String) -> RenewabilityRow {

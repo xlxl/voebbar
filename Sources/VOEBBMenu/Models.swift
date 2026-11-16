@@ -8,15 +8,9 @@ enum Urgency {
     static let soonDays = 14
 }
 
-struct LibraryAccount: Codable, Identifiable, Equatable {
-    var id: String { cardNumber }
+struct LibraryAccount: Codable {
     var name: String
     var cardNumber: String
-
-    init(name: String, cardNumber: String) {
-        self.name = name
-        self.cardNumber = cardNumber
-    }
 }
 
 struct Loan {
@@ -24,7 +18,6 @@ struct Loan {
     let dueDate: Date
     let dueDateString: String
     let library: String
-    let renewalStatus: String
     let checkboxValue: String
 
     /// Stable per-item barcode from the title cell (11-digit), used as the archive key.
@@ -147,7 +140,7 @@ struct RenewalOutcome {
 }
 
 /// A reserved item waiting for pickup ("Bereitstellung"). Info only — no action.
-struct PickupItem: Equatable {
+struct PickupItem {
     let title: String
     /// Barcode from the title cell; empty when VÖBB shows none.
     var mediaNumber: String = ""

@@ -39,12 +39,12 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         let contentView = NSView(frame: win.contentRect(forFrameRect: win.frame))
 
         // Title label
-        let titleLabel = makeLabel("Bibliothekskonten", font: .boldSystemFont(ofSize: 14))
+        let titleLabel = NSTextField.label("Bibliothekskonten", font: .boldSystemFont(ofSize: 14))
         titleLabel.frame = NSRect(x: 16, y: contentView.frame.height - 44, width: 300, height: 24)
         contentView.addSubview(titleLabel)
 
         // Subtitle
-        let subtitleLabel = makeLabel("Ausweisnummer und PIN werden sicher im macOS-Schlüsselbund gespeichert.", font: .systemFont(ofSize: 11))
+        let subtitleLabel = NSTextField.label("Ausweisnummer und PIN werden sicher im macOS-Schlüsselbund gespeichert.", font: .systemFont(ofSize: 11))
         subtitleLabel.textColor = .secondaryLabelColor
         subtitleLabel.frame = NSRect(x: 16, y: contentView.frame.height - 64, width: 440, height: 18)
         contentView.addSubview(subtitleLabel)
@@ -67,13 +67,12 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         table.delegate = self
         table.dataSource = self
         table.usesAlternatingRowBackgroundColors = true
-        table.target = self
         scrollView.documentView = table
         contentView.addSubview(scrollView)
         tableView = table
 
         // Buttons below table
-        let addBtn = NSButton(title: "+ Konto hinzufügen", target: self, action: #selector(onAdd))
+        let addBtn = NSButton(title: "+ Konto hinzufügen", target: self, action: #selector(showAddAccountSheet))
         addBtn.frame = NSRect(x: 16, y: 182, width: 160, height: 26)
         addBtn.bezelStyle = .rounded
         contentView.addSubview(addBtn)
@@ -88,7 +87,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         let rowEndX: CGFloat = removeBtn.frame.maxX
 
         // Refresh interval row
-        let intervalLabel = makeLabel("Automatische Aktualisierung alle:", font: .boldSystemFont(ofSize: 13))
+        let intervalLabel = NSTextField.label("Automatische Aktualisierung alle:", font: .boldSystemFont(ofSize: 13))
         intervalLabel.frame = NSRect(x: rowStartX, y: 148, width: rowEndX - rowStartX, height: 18)
         contentView.addSubview(intervalLabel)
         intervalButtons = makePillRow(
@@ -97,7 +96,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         )
 
         // Renewal-due-days row
-        let renewalLabel = makeLabel("Fällige verlängern – Frist (Tage):", font: .boldSystemFont(ofSize: 13))
+        let renewalLabel = NSTextField.label("Fällige verlängern – Frist (Tage):", font: .boldSystemFont(ofSize: 13))
         renewalLabel.frame = NSRect(x: rowStartX, y: 86, width: rowEndX - rowStartX, height: 18)
         contentView.addSubview(renewalLabel)
         renewalButtons = makePillRow(
@@ -122,15 +121,6 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
         win.contentView = contentView
         window = win
-    }
-
-    private func makeLabel(_ text: String, font: NSFont) -> NSTextField {
-        let field = NSTextField(labelWithString: text)
-        field.font = font
-        field.isBezeled = false
-        field.isEditable = false
-        field.backgroundColor = .clear
-        return field
     }
 
     private func reloadAccounts() {
@@ -191,10 +181,6 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - Actions
 
-    @objc private func onAdd() {
-        showAddAccountSheet()
-    }
-
     @objc private func onToggleNotifications(_ sender: NSButton) {
         AccountStorage.shared.notificationsEnabled = sender.state == .on
     }
@@ -246,7 +232,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - Add Account Sheet
 
-    private func showAddAccountSheet() {
+    @objc private func showAddAccountSheet() {
         guard let win = window else { return }
 
         let sheet = NSWindow(
@@ -283,30 +269,25 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         pwdField.placeholderString = "PIN"
         cv.addSubview(pwdField)
 
-        let infoLabel = makeLabel("Tipp: Bitte genau die Zeichen eingeben, die du auf der VÖBB-Website verwendest.", font: .systemFont(ofSize: 10))
+        let infoLabel = NSTextField.label("Tipp: Bitte genau die Zeichen eingeben, die du auf der VÖBB-Website verwendest.", font: .systemFont(ofSize: 10))
         infoLabel.textColor = .secondaryLabelColor
         infoLabel.frame = NSRect(x: 20, y: 72, width: 340, height: 28)
         infoLabel.lineBreakMode = .byWordWrapping
         cv.addSubview(infoLabel)
 
-        let cancelBtn = NSButton(title: "Abbrechen", target: nil, action: nil)
+        let cancelBtn = NSButton(title: "Abbrechen", target: self, action: #selector(dismissSheet))
         cancelBtn.frame = NSRect(x: 160, y: 20, width: 90, height: 26)
         cancelBtn.bezelStyle = .rounded
         cancelBtn.keyEquivalent = "\u{1B}"
         cv.addSubview(cancelBtn)
 
-        let saveBtn = NSButton(title: "Speichern", target: nil, action: nil)
+        let saveBtn = NSButton(title: "Speichern", target: self, action: #selector(saveAccount))
         saveBtn.frame = NSRect(x: 260, y: 20, width: 90, height: 26)
         saveBtn.bezelStyle = .rounded
         saveBtn.keyEquivalent = "\r"
         cv.addSubview(saveBtn)
 
         sheet.contentView = cv
-
-        cancelBtn.target = self
-        cancelBtn.action = #selector(dismissSheet)
-        saveBtn.target = self
-        saveBtn.action = #selector(saveAccount)
 
         win.beginSheet(sheet) { _ in }
         currentSheet = AddAccountSheet(window: sheet, nameField: nameField, cardField: cardField, pwdField: pwdField)
@@ -359,9 +340,6 @@ extension PreferencesWindowController: NSTableViewDataSource, NSTableViewDelegat
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let account = accounts[row]
         let cell = NSTextField(labelWithString: "")
-        cell.isBezeled = false
-        cell.isEditable = false
-        cell.backgroundColor = .clear
         switch tableColumn?.identifier.rawValue {
         case "name": cell.stringValue = account.name
         case "card": cell.stringValue = account.cardNumber

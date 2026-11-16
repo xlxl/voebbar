@@ -2,13 +2,15 @@ import Foundation
 
 /// Enriches archived items with ISBN + cover from VÖBB's **public catalog** (no login).
 ///
-/// Flow validated against the live site (see plan / `voebb-suche.har`):
+/// Flow validated against the live site:
 /// bootstrap GET → search POST (`$Autosuggest`) → the Trefferliste already carries the VLB
 /// cover, and thus the ISBN. Cover is downloaded (needs UA + aDIS Referer) into a shared cache.
 ///
-/// Strictly **incremental**: only items missing from `media_details` are crawled, so repeated
-/// account refreshes don't re-hit VÖBB. A fresh session per item keeps it robust against the
-/// short aDIS session timeout (`requestCount=1` every time).
+/// Normally **incremental**: only items missing from `media_details` are crawled, so repeated
+/// account refreshes don't re-hit VÖBB. On top of that come Fundus rescrapes, ISBN overrides,
+/// capped notfound retries, the detail backfill and the cover self-heal (see CLAUDE.md). A fresh
+/// session per item keeps it robust against the short aDIS session timeout (`requestCount=1`
+/// every time).
 final class CatalogEnricher {
     static let shared = CatalogEnricher()
     private init() {}
@@ -284,17 +286,7 @@ final class CatalogEnricher {
     /// Downloads the VLB cover (requires UA + aDIS Referer) into `covers/{media_number}.jpg`.
     /// Returns nil when there is no image (403/non-image → book without a VLB cover).
     private func downloadCover(_ urlString: String, mediaNumber: String, session: URLSession) async -> String? {
-        guard let url = URL(string: urlString) else { return nil }
-        var req = URLRequest(url: url)
-        req.setValue(ADISForm.userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("\(base)/aDISWeb/app", forHTTPHeaderField: "Referer")
-        guard let (data, response) = try? await session.data(for: req),
-              let http = response as? HTTPURLResponse, http.statusCode == 200,
-              (http.value(forHTTPHeaderField: "Content-Type") ?? "").hasPrefix("image/"),
-              !data.isEmpty else {
-            return nil
-        }
-        let fileURL = ArchiveStore.coversDirectory.appendingPathComponent("\(mediaNumber).jpg")
-        do { try data.write(to: fileURL); return fileURL.path } catch { return nil }
+        await CoverCache.download(urlString, mediaNumber: mediaNumber, session: session,
+                                  referer: "\(base)/aDISWeb/app")?.path
     }
 }

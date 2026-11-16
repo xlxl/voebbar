@@ -3,7 +3,9 @@ import SQLite3
 
 /// Persistent archive of every borrowed item, written on each successful refresh.
 ///
-/// voebbar only WRITES here; a separate archive app reads the same file. The single
+/// voebbar writes `borrow_events`, `media_details` and `pickups` here and reads back
+/// `media_isbn_override`, `fundus_media_types` and `fundus_rescrape`; a separate archive app
+/// reads the same file. The single
 /// contract between the two is this SQLite file and its `borrow_events` schema — no
 /// shared code, no IPC. The schema is designed so the archive app can add its own
 /// tables (ratings, covers, …) without voebbar knowing.
@@ -102,7 +104,7 @@ final class ArchiveStore {
             blurb        TEXT NOT NULL DEFAULT '',
             subjects     TEXT NOT NULL DEFAULT '',
             systematik   TEXT NOT NULL DEFAULT '',
-            source       TEXT NOT NULL DEFAULT '',   -- 'title' | 'isbn' | 'manual' | 'tonie'
+            source       TEXT NOT NULL DEFAULT '',   -- 'title' | 'manual' | 'tonie'
             status       TEXT NOT NULL DEFAULT '',   -- 'found' | 'notfound'
             fetched_at   TEXT NOT NULL DEFAULT '',
             author          TEXT NOT NULL DEFAULT '',
@@ -330,7 +332,7 @@ final class ArchiveStore {
 
     /// Sets a Tonie's cover image without clobbering any book fields (isbn/blurb/… stay untouched on
     /// conflict). Marks the row `source='tonie'`, `status='found'`.
-    func upsertToniImage(mediaNumber: String, coverPath: String) {
+    func upsertTonieImage(mediaNumber: String, coverPath: String) {
         onQueue(()) {
             run("""
                 INSERT INTO media_details (media_number, cover_path, source, status, fetched_at)
@@ -412,7 +414,7 @@ final class ArchiveStore {
             query("""
                 SELECT media_number, isbn FROM media_details
                 WHERE status = 'found' AND cover_path = '' AND isbn LIKE '97%'
-                  AND source IN ('title','isbn','manual') AND cover_attempts < 3;
+                  AND source IN ('title','manual') AND cover_attempts < 3;
                 """, row: { DetailTarget(mediaNumber: self.col($0, 0), isbn: self.col($0, 1)) })
         }
     }

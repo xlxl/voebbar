@@ -67,11 +67,11 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         let toolbar = NSView()
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
-        let titleLabel = label("Alle ausgeliehenen Medien", font: .boldSystemFont(ofSize: 14))
+        let titleLabel = NSTextField.label("Alle ausgeliehenen Medien", font: .boldSystemFont(ofSize: 14))
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         toolbar.addSubview(titleLabel)
 
-        let summaryLabel = label("", font: .systemFont(ofSize: 11))
+        let summaryLabel = NSTextField.label("", font: .systemFont(ofSize: 11))
         summaryLabel.textColor = .secondaryLabelColor
         summaryLabel.translatesAutoresizingMaskIntoConstraints = false
         toolbar.addSubview(summaryLabel)
@@ -239,17 +239,6 @@ final class OverviewWindowController: NSObject, NSWindowDelegate {
         guard !rows.isEmpty else { return }
         statusBar?.renewSelected(rows.map { allLoans[$0] }, anchor: window)
     }
-
-    // MARK: - Helper
-
-    private func label(_ text: String, font: NSFont) -> NSTextField {
-        let f = NSTextField(labelWithString: text)
-        f.font = font
-        f.isBezeled = false
-        f.isEditable = false
-        f.backgroundColor = .clear
-        return f
-    }
 }
 
 // MARK: - NSTableViewDataSource
@@ -290,9 +279,6 @@ extension OverviewWindowController: NSTableViewDelegate {
         let loan = item.loan
 
         let cell = NSTextField(labelWithString: "")
-        cell.isBezeled = false
-        cell.isEditable = false
-        cell.backgroundColor = .clear
         cell.lineBreakMode = .byTruncatingTail
 
         switch tableColumn?.identifier.rawValue {

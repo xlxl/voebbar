@@ -70,8 +70,8 @@ enum ADISHTTP {
         return URLSession(configuration: config)
     }
 
-    static func get(_ url: String, session: URLSession, referer: String = "") async throws -> String {
-        let req = request(url, referer: referer)
+    static func get(_ url: String, session: URLSession) async throws -> String {
+        let req = request(url, referer: "")
         return try await send(req, session: session)
     }
 
@@ -84,7 +84,7 @@ enum ADISHTTP {
     }
 
     /// Error pages (5xx/4xx) would otherwise be silently "parsed" as empty results.
-    static func checkHTTP(_ response: URLResponse) throws {
+    private static func checkHTTP(_ response: URLResponse) throws {
         if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
             throw VOEBBError.networkError("HTTP \(http.statusCode)")
         }

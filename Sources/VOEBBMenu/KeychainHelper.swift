@@ -2,16 +2,20 @@ import Foundation
 import Security
 
 enum KeychainHelper {
+    private static func baseQuery(for cardNumber: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: cardNumber,
+            kSecAttrService as String: "de.voebb.menubar",
+        ]
+    }
+
     /// Updates the existing item in place and only adds one when there is none. Delete + Add would
     /// create a fresh item each time and drop its "Immer erlauben" ACL — for the Tonies refresh
     /// token, which rotates on every enrichment run, that is every refresh.
     static func save(password: String, for cardNumber: String) {
         let data = password.data(using: .utf8)!
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: cardNumber,
-            kSecAttrService as String: "de.voebb.menubar",
-        ]
+        let query = baseQuery(for: cardNumber)
         var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if status == errSecItemNotFound {
             var add = query
@@ -26,13 +30,9 @@ enum KeychainHelper {
     }
 
     static func load(for cardNumber: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: cardNumber,
-            kSecAttrService as String: "de.voebb.menubar",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+        var query = baseQuery(for: cardNumber)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let data = result as? Data else { return nil }
@@ -40,11 +40,7 @@ enum KeychainHelper {
     }
 
     static func delete(for cardNumber: String) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: cardNumber,
-            kSecAttrService as String: "de.voebb.menubar",
-        ]
+        let query = baseQuery(for: cardNumber)
         SecItemDelete(query as CFDictionary)
     }
 }
