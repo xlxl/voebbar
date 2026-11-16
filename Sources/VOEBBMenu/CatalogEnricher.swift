@@ -15,7 +15,7 @@ final class CatalogEnricher {
     static let shared = CatalogEnricher()
     private init() {}
 
-    private let base = "https://www.voebb.de"
+    private let base = ADISHTTP.baseURL
     private let politeDelay: UInt64 = 400_000_000 // 0.4 s between items
 
     // MARK: - Orchestration
@@ -227,21 +227,44 @@ final class CatalogEnricher {
     /// Opens the full record from a Trefferliste (re-POST the page's hidden inputs plus the
     /// record's `selected` code). Same mechanism as voebbar's `navigate()`.
     private func openVollanzeige(recordID: String, term: String, trefferliste: String, ctx: Ctx) async throws -> String {
-        var data = ADISForm.extractHiddenInputs(trefferliste)
+        let data = Self.vollanzeigeFields(hidden: ADISForm.extractHiddenInputs(trefferliste), recordID: recordID, term: term)
+        return try await ADISHTTP.postRaw(ctx.appURL, body: ADISForm.encode(data), session: ctx.session, referer: ctx.appURL)
+    }
+
+    // MARK: - Request fields
+
+    /// `requestCount` is set, not echoed as in `VOEBBSession`: every search runs in a fresh session,
+    /// so the sequence is always 1 (search) → 2 (Vollanzeige). Echo it instead if a crawl ever
+    /// reuses a session for several requests.
+    static func searchFields(hidden: [String: String], term: String) -> [String: String] {
+        var data = catalogFields(hidden, term: term, requestCount: "1", focus: "$$GFBO_1", source: "$B", selected: "")
+        data["$Button"] = "pressed"
+        return data
+    }
+
+    static func vollanzeigeFields(hidden: [String: String], recordID: String, term: String) -> [String: String] {
+        var data = catalogFields(hidden, term: term, requestCount: "2", focus: "", source: "",
+                                 selected: ADISForm.selected(recordID))
+        data["$Tab"] = "0"
+        return data
+    }
+
+    /// What both catalog requests send on top of the page's hidden inputs.
+    private static func catalogFields(_ hidden: [String: String], term: String, requestCount: String,
+                                      focus: String, source: String, selected: String) -> [String: String] {
+        var data = hidden
         data["keyCode"] = "0"
-        data["focus"] = ""
+        data["focus"] = focus
         data["stz"] = ""
-        data["source"] = ""
-        data["selected"] = "ZTEXT       \(recordID)"
-        data["requestCount"] = "2"
+        data["source"] = source
+        data["selected"] = selected
+        data["requestCount"] = requestCount
         data["scriptEnabled"] = "true"
         data["scrollPos"] = "0"
         data["overrideScrollPos"] = "0"
         data["$Autosuggest"] = term
-        data["$Select"] = "Überall suchen"
-        data["$Tab"] = "0"
-
-        return try await ADISHTTP.postRaw(ctx.appURL, body: ADISForm.encode(data), session: ctx.session, referer: ctx.appURL)
+        data["$Select"] = ADISForm.selectEverywhere
+        return data
     }
 
     // MARK: - Catalog HTTP flow
@@ -255,31 +278,14 @@ final class CatalogEnricher {
     /// GET the start page (URLSession follows the redirect) → session-id URL + form hidden inputs.
     private func bootstrap() async throws -> Ctx {
         let session = ADISHTTP.makeSession()
-        let html = try await ADISHTTP.get("\(base)/aDISWeb/app/prod00?sp=SPROD00", session: session)
-        guard let sid = ADISForm.sessionID(in: html) else {
+        guard let start = try await ADISHTTP.openStartPage(session: session) else {
             throw VOEBBError.parseError("Katalog-Session nicht gefunden")
         }
-        return Ctx(session: session, appURL: "\(base)/aDISWeb/\(sid)/app", hidden: ADISForm.extractHiddenInputs(html))
+        return Ctx(session: session, appURL: start.appURL, hidden: start.hidden)
     }
 
-    /// `requestCount` is set, not echoed as in `VOEBBSession`: every search runs in a fresh session,
-    /// so the sequence is always 1 (search) → 2 (Vollanzeige). Echo it instead if a crawl ever
-    /// reuses a session for several requests.
     private func search(term: String, ctx: Ctx) async throws -> String {
-        var data = ctx.hidden
-        data["keyCode"] = "0"
-        data["focus"] = "$$GFBO_1"
-        data["stz"] = ""
-        data["source"] = "$B"
-        data["selected"] = ""
-        data["requestCount"] = "1"
-        data["scriptEnabled"] = "true"
-        data["scrollPos"] = "0"
-        data["overrideScrollPos"] = "0"
-        data["$Autosuggest"] = term
-        data["$Select"] = "Überall suchen"
-        data["$Button"] = "pressed"
-
+        let data = Self.searchFields(hidden: ctx.hidden, term: term)
         return try await ADISHTTP.postRaw(ctx.appURL, body: ADISForm.encode(data), session: ctx.session, referer: "\(base)/aDISWeb/app/prod00")
     }
 

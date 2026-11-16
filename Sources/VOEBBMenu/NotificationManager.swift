@@ -4,8 +4,9 @@ import UserNotifications
 /// User notifications for due-soon/overdue loans (and other rare, important events).
 ///
 /// Authorization is requested lazily on first use — macOS's own permission dialog is the opt-in.
-/// The feature can be turned off in Preferences (`AccountStorage.notificationsEnabled`).
-/// Clicking a notification opens the loans overview window.
+/// The Preferences switch (`AccountStorage.notificationsEnabled`) covers the due-soon reminders
+/// only and is checked by their caller — the "Abruf defekt?" warnings are error reports and
+/// always go out. Clicking a notification opens the loans overview window.
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationManager()
 
@@ -20,7 +21,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func notify(title: String, body: String) {
-        guard available, AccountStorage.shared.notificationsEnabled else { return }
+        guard available else { return }
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }

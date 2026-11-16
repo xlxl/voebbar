@@ -18,6 +18,23 @@ enum ADISForm {
         fields.map { "\(urlEncode($0.key))=\(urlEncode($0.value))" }.joined(separator: "&")
     }
 
+    /// Value of the search-scope field (`$Select`) that every catalog/navigation request carries.
+    static let selectEverywhere = "Überall suchen"
+
+    /// `selected` value of a request: the nav code (`*SZA`) or record id after aDIS's fixed-width
+    /// "ZTEXT" column.
+    static func selected(_ code: String) -> String { "ZTEXT       \(code)" }
+
+    /// Fields of a "change page" request: the current page's hidden inputs plus the nav code.
+    static func navigation(_ code: String, from hidden: [String: String]) -> [String: String] {
+        var fields = hidden
+        fields["scriptEnabled"] = "true"
+        fields["overrideScrollPos"] = "0"
+        fields["selected"] = selected(code)
+        fields["$Select"] = selectEverywhere
+        return fields
+    }
+
     /// First capture group of `pattern` in `text`, or nil.
     static func firstCapture(_ pattern: String, in text: String) -> String? {
         guard let regex = try? NSRegularExpression(pattern: pattern),
@@ -60,6 +77,19 @@ enum ADISForm {
 /// catalog crawl (`CatalogEnricher`) — previously two near-identical private copies. Same headers
 /// and timeout for both; the only per-call difference is the optional Referer.
 enum ADISHTTP {
+    static let baseURL = "https://www.voebb.de"
+
+    /// Session-bound form action that every request of an aDIS session posts to.
+    static func appURL(sessionID: String) -> String { "\(baseURL)/aDISWeb/\(sessionID)/app" }
+
+    /// GETs the start page (URLSession follows the redirect): the new session's form action URL
+    /// and the page's hidden inputs, or nil when the page carries no session id.
+    static func openStartPage(session: URLSession) async throws -> (appURL: String, hidden: [String: String])? {
+        let html = try await get("\(baseURL)/aDISWeb/app/prod00?sp=SPROD00", session: session)
+        guard let sessionID = ADISForm.sessionID(in: html) else { return nil }
+        return (appURL(sessionID: sessionID), ADISForm.extractHiddenInputs(html))
+    }
+
     /// A fresh ephemeral session: aDIS keeps its state in cookies, and nothing may leak between
     /// accounts or into the next run.
     static func makeSession() -> URLSession {

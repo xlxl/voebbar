@@ -19,7 +19,7 @@ enum VOEBBError: LocalizedError {
 /// Per-account scraping session. Stateful and single-use: one instance per operation (refresh,
 /// renewal), never shared between concurrent tasks.
 final class VOEBBSession {
-    private let baseURL = "https://www.voebb.de"
+    private let baseURL = ADISHTTP.baseURL
     private let session: URLSession
     private let account: LibraryAccount
 
@@ -289,18 +289,12 @@ final class VOEBBSession {
     /// Returns the overview page (the landing page after login) and sets `appURL`/`currentPage`.
     private func login(password: String) async throws -> String {
         // 1. Load main page to get session ID from form action
-        let mainHTML = try await ADISHTTP.get("\(baseURL)/aDISWeb/app/prod00?sp=SPROD00", session: session)
-        guard let sessionID = ADISForm.sessionID(in: mainHTML) else {
+        guard let start = try await ADISHTTP.openStartPage(session: session) else {
             throw VOEBBError.loginFailed("Session-ID nicht gefunden")
         }
 
         // 2. POST navigation to account section → triggers OIDC redirect
-        var navData = ADISForm.extractHiddenInputs(mainHTML)
-        navData["scriptEnabled"] = "true"
-        navData["overrideScrollPos"] = "0"
-        navData["selected"] = "ZTEXT       *SBK"
-        navData["$Select"] = "Überall suchen"
-        _ = try await ADISHTTP.postRaw("\(baseURL)/aDISWeb/\(sessionID)/app", body: ADISForm.encode(navData),
+        _ = try await ADISHTTP.postRaw(start.appURL, body: ADISForm.encode(ADISForm.navigation("*SBK", from: start.hidden)),
                                        session: session, referer: "\(baseURL)/aDISWeb/app/prod00")
 
         // 3. POST credentials
@@ -324,7 +318,7 @@ final class VOEBBSession {
         guard let sid = ADISForm.sessionID(in: afterLoginHTML) else {
             throw VOEBBError.loginFailed("Session nach Login nicht gefunden")
         }
-        appURL = "\(baseURL)/aDISWeb/\(sid)/app"
+        appURL = ADISHTTP.appURL(sessionID: sid)
         currentPage = afterLoginHTML
         return afterLoginHTML
     }
@@ -346,10 +340,7 @@ final class VOEBBSession {
 
     /// "Changes page" by re-POSTing the current page's form with a nav code (e.g. *SZA = loans).
     private func navigate(_ navCode: String) async throws -> String {
-        var fields = try followUpFields()
-        fields["selected"] = "ZTEXT       \(navCode)"
-        fields["$Select"] = "Überall suchen"
-        return try await post(ADISForm.encode(fields))
+        try await post(ADISForm.encode(ADISForm.navigation(navCode, from: try followUpFields())))
     }
 
     /// Presses a `$Button$N` submit button (renewal buttons, "Zur Übersicht") by re-POSTing the
